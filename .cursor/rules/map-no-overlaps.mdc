@@ -29,7 +29,8 @@ When adding or moving world objects (zones, unlock pads, fields, buildings, truc
 | Barn | 2.0 × 1.6 |
 | Coop | 1.2 × 0.9 |
 | Processor | 1.1 × 0.7 |
-| Truck (parked) | ~0.75 × 1.65 |
+| Truck LOAD pad | ~1.1 × 1.0 (east border, inside fence) |
+| Truck (parked) | ~0.75 × 1.65 (east fence gap) |
 | Factory | ~1.6 × 1.2 |
 | Conveyor belt | ~0.7 × 7+ |
 | Train (parked) | ~0.75 × 2.5 (along N–S) |

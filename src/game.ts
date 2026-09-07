@@ -14,6 +14,7 @@ import {
   makeFence,
   makeGoods,
   makeGround,
+  makeIrrigation,
   makeItem,
   makeLabelSprite,
   makePortalGate,
@@ -73,7 +74,11 @@ const UNLOCK_ORDER = [
   'jarLoader',
   'workerSpeed',
   'truckBay2',
+  'fieldUp',
+  'fieldUp2',
   'field2',
+  'wheatUp',
+  'wheatUp2',
   'shop2',
   'shop2Helper',
   'collector2',
@@ -201,6 +206,8 @@ type TruckStation = {
   truck: TruckOrder | null
   respawn: number
   active: boolean
+  zoneMesh: THREE.Mesh
+  labelMesh: THREE.Sprite
 }
 
 type Goal = {
@@ -348,6 +355,10 @@ export class Game {
   private saveTimer = 0
   private conveyorGroup: THREE.Group | null = null
   private factoryMesh: THREE.Group | null = null
+  private cropIrrigation: THREE.Group | null = null
+  private wheatIrrigation: THREE.Group | null = null
+  private cropIrrigationTier = 0
+  private wheatIrrigationTier = 0
 
   constructor(canvas: HTMLCanvasElement) {
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 140)
@@ -482,17 +493,50 @@ export class Game {
     return this.fenceExtent + 6
   }
 
-  private syncTruckLeavePositions() {
+  /** LOAD pads sit just inside the east fence. */
+  private truckLoadX() {
+    return this.fenceExtent - 2.5
+  }
+
+  /** Trucks park in the east fence gap / just outside. */
+  private truckWaitX() {
+    return this.fenceExtent + 1.6
+  }
+
+  private truckBayZ(id: string) {
+    if (id === 'A') return 3.2
+    if (id === 'B') return 0.5
+    return -2.2
+  }
+
+  private layoutTruckStation(st: TruckStation) {
+    const z = this.truckBayZ(st.id)
+    const lx = this.truckLoadX()
+    const wx = this.truckWaitX()
     const leaveX = this.truckLeaveX()
-    for (const st of this.truckStations) {
-      st.leavePos.set(leaveX, 0, st.waitPos.z)
-      if (st.truck) {
-        st.truck.leavePos.set(leaveX, 0, st.waitPos.z)
-        if (st.truck.state === 'arrive') {
-          st.truck.mesh.position.x = Math.max(st.truck.mesh.position.x, leaveX - 0.5)
-          st.truck.mesh.position.z = st.waitPos.z
-        }
+    st.loadZone.set(lx, 0, z)
+    st.waitPos.set(wx, 0, z)
+    st.leavePos.set(leaveX, 0, z)
+    st.zoneMesh.position.set(lx, 0.04, z)
+    st.labelMesh.position.set(lx, 1.0, z)
+    if (st.truck) {
+      st.truck.waitPos.set(wx, 0, z)
+      st.truck.leavePos.set(leaveX, 0, z)
+      if (st.truck.state === 'wait') {
+        st.truck.mesh.position.set(wx, 0, z)
+      } else if (st.truck.state === 'arrive') {
+        st.truck.mesh.position.x = Math.max(st.truck.mesh.position.x, leaveX - 0.5)
+        st.truck.mesh.position.z = z
+      } else if (st.truck.state === 'leave') {
+        st.truck.mesh.position.z = z
       }
+    }
+  }
+
+  private syncTruckLeavePositions() {
+    for (const st of this.truckStations) {
+      if (!st.active) continue
+      this.layoutTruckStation(st)
     }
   }
 
@@ -630,6 +674,7 @@ export class Game {
       this.fieldCenter.z = cz
       this.rebuildFieldGround(crop)
       this.rebuildCropVisual(crop)
+      if (this.cropIrrigationTier > 0) this.syncIrrigation('crop', this.cropIrrigationTier as 1 | 2)
     }
 
     const wheat = this.getWheatField()
@@ -640,6 +685,51 @@ export class Game {
       this.fieldCenter2.z = cz
       this.rebuildWheatGround(wheat)
       this.rebuildCropVisual(wheat)
+      if (this.wheatIrrigationTier > 0) this.syncIrrigation('wheat', this.wheatIrrigationTier as 1 | 2)
+    }
+  }
+
+  private syncIrrigation(kind: 'crop' | 'wheat', tier: 1 | 2) {
+    const field = kind === 'wheat' ? this.getWheatField() : this.getField()
+    if (!field) return
+    const prev = kind === 'wheat' ? this.wheatIrrigation : this.cropIrrigation
+    if (prev) {
+      this.scene.remove(prev)
+      prev.traverse((obj) => {
+        const mesh = obj as THREE.Mesh
+        if (mesh.isMesh) {
+          mesh.geometry?.dispose()
+          const mat = mesh.material
+          if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
+          else mat?.dispose()
+        }
+      })
+    }
+    const irr = makeIrrigation(field.halfW, field.halfD, tier)
+    irr.position.set(field.pos.x, 0, field.pos.z)
+    this.scene.add(irr)
+    if (kind === 'wheat') {
+      this.wheatIrrigation = irr
+      this.wheatIrrigationTier = tier
+    } else {
+      this.cropIrrigation = irr
+      this.cropIrrigationTier = tier
+    }
+  }
+
+  private updateIrrigationVisuals() {
+    const t = this.clock.elapsedTime
+    for (const irr of [this.cropIrrigation, this.wheatIrrigation]) {
+      if (!irr) continue
+      const sprays = irr.getObjectByName('sprays')
+      if (!sprays) continue
+      for (let i = 0; i < sprays.children.length; i++) {
+        const s = sprays.children[i] as THREE.Mesh
+        const pulse = 0.14 + Math.sin(t * 3.2 + i * 0.7) * 0.1
+        const mat = s.material as THREE.MeshBasicMaterial
+        mat.opacity = Math.max(0.08, pulse)
+        s.scale.setScalar(0.9 + Math.sin(t * 2.4 + i) * 0.12)
+      }
     }
   }
 
@@ -740,7 +830,7 @@ export class Game {
       this.createUnlockPad('collectorUp', 1100, new THREE.Vector3(2.0, 0, 4.0), '💨', 'collector'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('truck', 900, new THREE.Vector3(6.0, 0, 3.2), '🚚', 'collector'),
+      this.createUnlockPad('truck', 900, new THREE.Vector3(8.2, 0, 3.2), '🚚', 'collector'),
     )
     this.unlockPads.push(
       this.createUnlockPad('autoprocess', 1100, new THREE.Vector3(4.5, 0, 1.8), '⚙️', 'truck'),
@@ -753,16 +843,28 @@ export class Game {
       this.createUnlockPad('eggRunner', 1600, new THREE.Vector3(1.2, 0, -1.8), '🥚', 'mapExpand'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('jarLoader', 1800, new THREE.Vector3(6.2, 0, 5.8), '📦', 'eggRunner'),
+      this.createUnlockPad('jarLoader', 1800, new THREE.Vector3(14.2, 0, 5.2), '📦', 'eggRunner'),
     )
     this.unlockPads.push(
       this.createUnlockPad('workerSpeed', 1900, new THREE.Vector3(3.5, 0, 0.5), '⚡', 'jarLoader'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('truckBay2', 2000, new THREE.Vector3(5.5, 0, -0.5), '🚚', 'workerSpeed'),
+      this.createUnlockPad('truckBay2', 2000, new THREE.Vector3(14.5, 0, 1.2), '🚚', 'workerSpeed'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('fieldUp', 2100, new THREE.Vector3(3.4, 0, -4.0), '🌱', 'barn'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('fieldUp2', 2600, new THREE.Vector3(3.4, 0, -2.4), '🌱', 'fieldUp'),
     )
     this.unlockPads.push(
       this.createUnlockPad('field2', 2400, new THREE.Vector3(15.8, 0, 5.0), '🌾', 'truckBay2'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('wheatUp', 2700, new THREE.Vector3(10.2, 0, -4.2), '🌾', 'field2'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('wheatUp2', 3200, new THREE.Vector3(16.8, 0, -8.2), '🌾', 'wheatUp'),
     )
     this.unlockPads.push(
       this.createUnlockPad('shop2', 2800, new THREE.Vector3(10.0, 0, 5.8), '🏪', 'field2'),
@@ -781,7 +883,7 @@ export class Game {
       this.createUnlockPad('cashier2', 3100, new THREE.Vector3(12.0, 0, 5.9), '🧾', 'collector2'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('truckBay3', 3400, new THREE.Vector3(5.5, 0, -3.0), '🚛', 'cashier2'),
+      this.createUnlockPad('truckBay3', 3400, new THREE.Vector3(14.5, 0, -1.5), '🚛', 'cashier2'),
     )
     // West endgame: factory → conveyor → train
     this.unlockPads.push(
@@ -1091,6 +1193,7 @@ export class Game {
         this.rebuildCropVisual(field)
       }
     }
+    this.updateIrrigationVisuals()
   }
 
   private updateSelling(dt: number) {
@@ -1457,10 +1560,38 @@ export class Game {
       if (!silent) this.setHint('Truck bay B online. Unlock the wheat field!')
     }
 
+    if (id === 'fieldUp') {
+      this.boostField({ max: 55, regen: 0.22, fillRatio: 0.55, kind: 'crop' })
+      this.syncIrrigation('crop', 1)
+      this.stage = Math.max(this.stage, 17)
+      if (!silent) this.setHint('Irrigation online — FIELD grows faster!')
+    }
+
+    if (id === 'fieldUp2') {
+      this.boostField({ max: 70, regen: 0.12, fillRatio: 0.6, kind: 'crop' })
+      this.syncIrrigation('crop', 2)
+      this.stage = Math.max(this.stage, 18)
+      if (!silent) this.setHint('Advanced sprinklers — FIELD is turbo!')
+    }
+
     if (id === 'field2') {
       this.spawnField2()
       this.stage = Math.max(this.stage, 18)
-      if (!silent) this.setHint('Wheat field ready. Build a second shop!')
+      if (!silent) this.setHint('Wheat field ready. Boost it or build a second shop!')
+    }
+
+    if (id === 'wheatUp') {
+      this.boostField({ max: 32, regen: 0.45, fillRatio: 0.5, kind: 'wheat' })
+      this.syncIrrigation('wheat', 1)
+      this.stage = Math.max(this.stage, 19)
+      if (!silent) this.setHint('Wheat irrigation online — grows faster!')
+    }
+
+    if (id === 'wheatUp2') {
+      this.boostField({ max: 48, regen: 0.22, fillRatio: 0.55, kind: 'wheat' })
+      this.syncIrrigation('wheat', 2)
+      this.stage = Math.max(this.stage, 20)
+      if (!silent) this.setHint('Wheat sprinklers maxed — keep the shop stocked!')
     }
 
     if (id === 'shop2') {
@@ -1906,69 +2037,55 @@ export class Game {
   }
 
   private spawnTruckBayA() {
-    this.ensureStation(
-      'A',
-      new THREE.Vector3(7.5, 0, 1.5),
-      ['jar'],
-      'LOAD-A',
-      true,
-    )
+    this.ensureStation('A', ['jar'], 'LOAD-A', true)
   }
 
   private activateTruckStation(id: 'B' | 'C') {
     if (id === 'B') {
-      this.ensureStation(
-        'B',
-        new THREE.Vector3(7.5, 0, -0.8),
-        ['jar'],
-        'LOAD-B',
-        true,
-      )
+      this.ensureStation('B', ['jar'], 'LOAD-B', true)
     } else {
-      this.ensureStation(
-        'C',
-        new THREE.Vector3(7.5, 0, -3.1),
-        ['jar', 'wheat'],
-        'LOAD-C',
-        true,
-      )
+      this.ensureStation('C', ['jar', 'wheat'], 'LOAD-C', true)
     }
   }
 
   private ensureStation(
     id: string,
-    loadZone: THREE.Vector3,
     accepts: ItemKind[],
     labelText: string,
     spawnNow: boolean,
   ) {
     let st = this.truckStations.find((s) => s.id === id)
     if (!st) {
-      // Truck parks beside the LOAD pad (same Z), not behind it
-      const waitPos = loadZone.clone().add(new THREE.Vector3(2.8, 0, 0))
-      const leavePos = new THREE.Vector3(this.truckLeaveX(), 0, waitPos.z)
-      st = {
-        id,
-        loadZone: loadZone.clone(),
-        waitPos,
-        leavePos,
-        accepts,
-        truck: null,
-        respawn: 0,
-        active: true,
-      }
-      this.truckStations.push(st)
+      const z = this.truckBayZ(id)
+      const loadZone = new THREE.Vector3(this.truckLoadX(), 0, z)
+      const waitPos = new THREE.Vector3(this.truckWaitX(), 0, z)
+      const leavePos = new THREE.Vector3(this.truckLeaveX(), 0, z)
       const zone = makeZonePlane(2.2, 2.0, 0x38bdf8, 0.4)
       zone.position.set(loadZone.x, 0.04, loadZone.z)
       this.scene.add(zone)
       const label = makeLabelSprite(labelText, '#bae6fd')
       label.position.set(loadZone.x, 1.0, loadZone.z)
       this.scene.add(label)
+      st = {
+        id,
+        loadZone,
+        waitPos,
+        leavePos,
+        accepts,
+        truck: null,
+        respawn: 0,
+        active: true,
+        zoneMesh: zone,
+        labelMesh: label,
+      }
+      this.truckStations.push(st)
+      this.layoutTruckStation(st)
       // Open east fence at this bay so the truck can enter/leave
       this.rebuildFence(this.fenceExtent, this.fenceNorth)
     } else {
       st.active = true
       st.accepts = accepts
+      this.layoutTruckStation(st)
       this.rebuildFence(this.fenceExtent, this.fenceNorth)
     }
     if (spawnNow && !st.truck) this.spawnTruckForStation(st)

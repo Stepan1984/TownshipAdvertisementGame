@@ -43,13 +43,15 @@ Open http://127.0.0.1:5173/ (or the Network URL for LAN).
 15. **Jar loader** — jars → truck bays  
 16. **Worker speed** — couriers move faster  
 17. **Truck bay B** — second jar station  
-18. **Wheat field** — second crop  
-19. **Shop 2** — wheat counter + queue (manual SELL-B)  
-20. **Shop 2 helper** — wheat → SELL-B  
-21. **Collector 2** — auto-picks SELL-B cash  
-22. **Collector upgrade II** — scoop rate boost  
-23. **Cashier 2** — auto-sell SELL-B  
-24. **Truck bay C** — jars + wheat  
+18. **Field grow I/II** — purple FIELD regenerates faster  
+19. **Wheat field** — second crop  
+20. **Wheat grow I/II** — WHEAT regenerates faster  
+21. **Shop 2** — wheat counter + queue (manual SELL-B)  
+22. **Shop 2 helper** — wheat → SELL-B  
+23. **Collector 2** — auto-picks SELL-B cash  
+24. **Collector upgrade II** — scoop rate boost  
+25. **Cashier 2** — auto-sell SELL-B  
+26. **Truck bay C** — jars + wheat  
 
 ### West endgame
 

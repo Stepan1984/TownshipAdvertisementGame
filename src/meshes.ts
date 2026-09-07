@@ -664,3 +664,82 @@ export function makeGoods(tier: 0 | 1 | 2 | 3 = 0): THREE.Group {
   g.userData.tier = tier
   return g
 }
+
+/** Overhead irrigation pipes + sprinklers sized to a field footprint. tier 2 = denser. */
+export function makeIrrigation(halfW: number, halfD: number, tier: 1 | 2 = 1): THREE.Group {
+  const g = new THREE.Group()
+  g.name = 'irrigation'
+  const pipeMat = new THREE.MeshLambertMaterial({ color: 0x64748b })
+  const headMat = new THREE.MeshLambertMaterial({ color: 0x38bdf8 })
+  const sprayMat = new THREE.MeshBasicMaterial({
+    color: 0x7dd3fc,
+    transparent: true,
+    opacity: tier === 2 ? 0.28 : 0.18,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  })
+
+  const spanX = halfW * 2 - 0.4
+  const spanZ = halfD * 2 - 0.4
+  const pipeY = 1.35 + (tier === 2 ? 0.15 : 0)
+
+  // Main run north–south down the middle
+  const main = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, spanZ, 6), pipeMat)
+  main.rotation.x = Math.PI / 2
+  main.position.set(0, pipeY, 0)
+  g.add(main)
+
+  // Cross arms east–west
+  const arms = tier === 2 ? 3 : 2
+  for (let i = 0; i < arms; i++) {
+    const t = arms === 1 ? 0 : i / (arms - 1)
+    const z = (t - 0.5) * (spanZ * 0.85)
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, spanX * 0.9, 6), pipeMat)
+    arm.rotation.z = Math.PI / 2
+    arm.position.set(0, pipeY, z)
+    g.add(arm)
+  }
+
+  const cols = tier === 2 ? 4 : 3
+  const rows = tier === 2 ? 4 : 3
+  const sprays = new THREE.Group()
+  sprays.name = 'sprays'
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const u = cols === 1 ? 0.5 : c / (cols - 1)
+      const v = rows === 1 ? 0.5 : r / (rows - 1)
+      const x = (u - 0.5) * spanX * 0.85
+      const z = (v - 0.5) * spanZ * 0.85
+      const riser = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.55, 6), pipeMat)
+      riser.position.set(x, pipeY - 0.25, z)
+      g.add(riser)
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), headMat)
+      head.position.set(x, pipeY + 0.08, z)
+      g.add(head)
+      const spray = new THREE.Mesh(
+        new THREE.CircleGeometry(0.55 + tier * 0.2, 16),
+        sprayMat.clone(),
+      )
+      spray.rotation.x = -Math.PI / 2
+      spray.position.set(x, 0.35 + tier * 0.08, z)
+      sprays.add(spray)
+    }
+  }
+  g.add(sprays)
+
+  const tank = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.35, 0.4, 0.9, 10),
+    new THREE.MeshLambertMaterial({ color: 0x0ea5e9 }),
+  )
+  tank.position.set(-halfW + 0.35, 0.5, halfD - 0.35)
+  g.add(tank)
+  const tankTop = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.38, 0.38, 0.08, 10),
+    new THREE.MeshLambertMaterial({ color: 0x0369a1 }),
+  )
+  tankTop.position.set(tank.position.x, 0.98, tank.position.z)
+  g.add(tankTop)
+
+  g.userData.tier = tier
+  return g
+}
