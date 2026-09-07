@@ -1,0 +1,61 @@
+---
+description: Prevent incorrect spatial overlaps of objects placed on the game map
+globs: src/game.ts,src/meshes.ts
+alwaysApply: false
+---
+
+# Map Layout — No Incorrect Overlaps
+
+When adding or moving world objects (zones, unlock pads, fields, buildings, trucks, NPCs, decor, fences), keep footprints clear of each other.
+
+## Checklist before finishing a layout change
+
+1. List new/changed positions with approximate half-extents (x, z).
+2. Check AABB overlap against nearby fixed objects (fields, shop zones, DUMP/PROCESS/EGGS, pads, barn/coop, truck load/wait, fence).
+3. Fix any **incorrect** stack (pad inside building, truck on field, zone on another zone, decor through fence, customers through solid fence).
+
+## Allowed adjacencies (do not “fix”)
+
+- PROCESS zone next to processor mesh
+- Truck LOAD zone next to that bay’s wait/park pose
+- Counter next to its SELL pad
+
+## Typical footprints (approx half-size)
+
+| Object | Half W×D |
+|--------|----------|
+| Unlock pad | 0.9 × 0.9 |
+| Zone plane 1.6–2.2 | ~0.8–1.1 |
+| Barn | 2.0 × 1.6 |
+| Coop | 1.2 × 0.9 |
+| Processor | 1.1 × 0.7 |
+| Truck (parked) | ~0.75 × 1.65 |
+| Factory | ~1.6 × 1.2 |
+| Conveyor belt | ~0.7 × 7+ |
+| Train (parked) | ~0.75 × 2.5 (along N–S) |
+| Train depot | ~2.1 × 1.6 |
+| Portal gate | ~1.1 × 0.2 |
+| Field1 | 4.2 × 2.4 |
+| Field2 (wheat) | 3.2 × 1.8 |
+
+## Examples
+
+```typescript
+// ❌ BAD — unlock pad on field / truck wait on wheat
+createUnlockPad('field2', …, new THREE.Vector3(12, 0, -3.5), …)
+// waitPos lands inside field2
+
+// ✅ GOOD — pad and waits clear of soil AABB
+createUnlockPad('field2', …, new THREE.Vector3(15.8, 0, 5.0), …)
+// truck wait z north of field2 north edge
+```
+
+```typescript
+// ❌ BAD — egg zone inside coop footprint
+eggPos = (7.5, -8.2); coop at (7.5, -8.2)
+
+// ✅ GOOD — eggs in front of coop, chickens beside not inside
+eggPos = (7.5, -6.0); coop at (7.5, -8.5)
+```
+
+After layout edits: mentally (or with a quick AABB check) verify pads vs buildings/fields/trucks/fence gates. If map expands, ensure shop2 has a real fence gate — not only a label on solid fence.
