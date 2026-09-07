@@ -855,7 +855,7 @@ export class Game {
       this.createUnlockPad('fieldUp', 2100, new THREE.Vector3(3.4, 0, -4.0), '🌱', 'barn'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('fieldUp2', 2600, new THREE.Vector3(3.4, 0, -2.4), '🌱', 'fieldUp'),
+      this.createUnlockPad('fieldUp2', 2600, new THREE.Vector3(3.4, 0, -4.0), '🌱', 'fieldUp'),
     )
     this.unlockPads.push(
       this.createUnlockPad('field2', 2400, new THREE.Vector3(15.8, 0, 5.0), '🌾', 'truckBay2'),
@@ -864,7 +864,7 @@ export class Game {
       this.createUnlockPad('wheatUp', 2700, new THREE.Vector3(10.2, 0, -4.2), '🌾', 'field2'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('wheatUp2', 3200, new THREE.Vector3(16.8, 0, -8.2), '🌾', 'wheatUp'),
+      this.createUnlockPad('wheatUp2', 3200, new THREE.Vector3(10.2, 0, -4.2), '🌾', 'wheatUp'),
     )
     this.unlockPads.push(
       this.createUnlockPad('shop2', 2800, new THREE.Vector3(10.0, 0, 5.8), '🏪', 'field2'),
