@@ -6,7 +6,8 @@ Browser arcade-idle farm inspired by Township-style ads.
 
 https://Stepan1984.github.io/TownshipAdvertisementGame/
 
-(Deployed automatically to GitHub Pages on every push to `main`.)
+On push to `main`, Actions builds the game and publishes the `gh-pages` branch.
+In the repo: **Settings → Pages → Deploy from a branch → `gh-pages` / root**.
 
 ## Run locally
 
