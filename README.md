@@ -2,7 +2,13 @@
 
 Browser arcade-idle farm inspired by Township-style ads.
 
-## Run
+## Play online
+
+https://Stepan1984.github.io/TownshipAdvertisementGame/
+
+(Deployed automatically to GitHub Pages on every push to `main`.)
+
+## Run locally
 
 ```bash
 npm install
@@ -63,6 +69,7 @@ Open http://127.0.0.1:5173/ (or the Network URL for LAN).
 30. **Collector upgrade III** — max scoop speed  
 31. **Factory / conveyor / train upgrades** — faster spawn, faster belt, bigger payouts  
 32. **Portals 1–3** — stack on the belt (scale + value tiers)  
+33. **NoRiseRing** — builds the street circuit north of the farm  
 
 Goals in the top-left pay cash when completed.
 

@@ -10,6 +10,7 @@ import {
   makeCoop,
   makeCounter,
   makeCropItem,
+  makeDumpSandbox,
   makeFactory,
   makeFence,
   makeGoods,
@@ -17,12 +18,18 @@ import {
   makeIrrigation,
   makeItem,
   makeLabelSprite,
+  makeNorisring,
   makePortalGate,
+  type TrackWallSeg,
   makeProcessor,
+  makeRaceCar,
+  makeSuperRaceCar,
   makeTractorMesh,
+  attachTractorTrailer,
   makeTrain,
   makeTrainDepot,
   makeTrainRails,
+  makeTrainRailsAlong,
   makeTruck,
   makeZonePlane,
 } from './meshes'
@@ -42,13 +49,23 @@ const TRAIN_LOAD_POINT = new THREE.Vector3(BELT_X, 0, 6.6)
  * rot.y=π/2 → cargo local+X≈2.4 at z≈wait−2.4; south tip ≈ wait−3.5.
  */
 const TRAIN_WAIT = new THREE.Vector3(BELT_X, 0, 11.6)
-/** Matches makeGround(48) half-extent — rails run to the north grass edge. */
-const GROUND_HALF = 24
+/** Matches makeGround size half-extent — rails run to the north grass edge. */
+const GROUND_SIZE = 260
+const GROUND_HALF = GROUND_SIZE / 2
 const RAIL_Z_START = 6.5
-const RAIL_Z_END = GROUND_HALF - 0.4
+/** Where the N–S run bends west (north of the depot / fence). */
+const TRAIN_CURVE_Z0 = 22
+const TRAIN_CURVE_R = 13
+/** Local half-depth of scaled flat Norisring (hairpin to hairpin). */
+const NORISRING_HALF_Z = 48.5
 
 const MAX_STACK_BASE = 16
 const PLAYER_SPEED = 6.2
+const RACE_CAR_SPEED = 16
+const SUPER_CAR_SPEED = 30
+/** Approx footprint radius for car–car blocking. */
+const RACE_CAR_RADIUS = 1.15
+const SUPER_CAR_RADIUS = 1.35
 const CROP_VALUE = 8
 const JAR_VALUE = 20
 const EGG_VALUE = 12
@@ -59,6 +76,7 @@ const SAVE_KEY = 'townshipAdGame_v1'
 const UNLOCK_ORDER = [
   'plots',
   'tractor',
+  'tractorUp',
   'helper',
   'processor',
   'cashier',
@@ -97,6 +115,9 @@ const UNLOCK_ORDER = [
   'portal1',
   'portal2',
   'portal3',
+  'norisring',
+  'raceCar',
+  'superCar',
 ] as const
 
 type ItemKind = 'crop' | 'jar' | 'egg' | 'wheat'
@@ -117,6 +138,8 @@ type TrainAI = {
   cargoCount: number
   waitPos: THREE.Vector3
   leavePos: THREE.Vector3
+  /** 0 = wait/depot, 1 = west leave end. Nose always faces toward leave. */
+  pathU: number
   label: THREE.Sprite
   loadCooldown: number
   respawn: number
@@ -138,7 +161,19 @@ type GroundStack = {
   mesh: THREE.Group
   kinds: ItemKind[]
   pos: THREE.Vector3
+  /** Dump sandbox uses a wide grid; other piles stay compact. */
+  mode?: 'dump' | 'pile'
 }
+
+/** Dump sandbox fill: 12 rows × N cols × 4 high per cell. */
+const DUMP_COLS = 8
+const DUMP_ROWS = 12
+const DUMP_LAYERS = 4
+const DUMP_CAPACITY = DUMP_COLS * DUMP_ROWS * DUMP_LAYERS
+const DUMP_PAD_X = 5.4
+const DUMP_PAD_Z = 5.0
+const TRACTOR_CARGO_BASE = 14
+const TRACTOR_CARGO_UP = 44
 
 type MoneyStack = {
   mesh: THREE.Group
@@ -172,6 +207,7 @@ type UnlockPad = {
 type TractorAI = {
   mesh: THREE.Group
   cargo: ItemKind[]
+  capacity: number
   state: 'seek' | 'harvest' | 'dump'
   targetPile: CropPile | null
   timer: number
@@ -298,7 +334,7 @@ export class Game {
   processorPos = new THREE.Vector3(-6.8, 0, -0.8)
   processZone = new THREE.Vector3(-5.3, 0, -0.8)
   processOutPos = new THREE.Vector3(-8.3, 0, -0.8)
-  dumpPos = new THREE.Vector3(-2.5, 0, 5.0)
+  dumpPos = new THREE.Vector3(-6.0, 0, 8.0)
   fieldCenter = new THREE.Vector3(0, 0, -6.5)
   fieldCenter2 = new THREE.Vector3(12.5, 0, -7.5)
 
@@ -329,6 +365,13 @@ export class Game {
   portalsActive = [false, false, false]
   portalMeshes: (THREE.Group | null)[] = [null, null, null]
   train: TrainAI | null = null
+  private trainCurve: THREE.CatmullRomCurve3 | null = null
+  private trainRailsGroup: THREE.Group | null = null
+  raceCar: THREE.Group | null = null
+  superCar: THREE.Group | null = null
+  /** Currently driven vehicle mesh (raceCar or superCar). */
+  private drivenCar: THREE.Group | null = null
+  private carInteractCd = 0
   trainMoneyPos = new THREE.Vector3(BELT_X + 2.8, 0, 7.8)
 
   private hintEl = document.getElementById('hint')!
@@ -359,9 +402,11 @@ export class Game {
   private wheatIrrigation: THREE.Group | null = null
   private cropIrrigationTier = 0
   private wheatIrrigationTier = 0
+  /** Solid barriers (Norisring Armco, etc.) — player cannot walk through. */
+  private solidWalls: TrackWallSeg[] = []
 
   constructor(canvas: HTMLCanvasElement) {
-    this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 140)
+    this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 360)
     this.camera.position.set(14, 16, 14)
     this.camera.lookAt(0, 0, 0)
 
@@ -369,7 +414,7 @@ export class Game {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))
     this.renderer.shadowMap.enabled = false
     this.renderer.setClearColor(0x87ceeb)
-    this.scene.fog = new THREE.Fog(0x87ceeb, 40, 80)
+    this.scene.fog = new THREE.Fog(0x87ceeb, 80, 220)
 
     const hemi = new THREE.HemisphereLight(0xfff2cc, 0x4a7c3a, 1.0)
     this.scene.add(hemi)
@@ -377,7 +422,7 @@ export class Game {
     sun.position.set(10, 18, 8)
     this.scene.add(sun)
 
-    this.scene.add(makeGround(48))
+    this.scene.add(makeGround(GROUND_SIZE))
     this.buildDecor()
     this.buildCounterArea()
     this.buildCropPlots()
@@ -403,11 +448,150 @@ export class Game {
     this.onResize()
     window.addEventListener('resize', () => this.onResize())
     this.loadProgress()
+    // Rebuild track with latest mesh code (unlock path may have used a cached early return before)
+    if (this.unlocked.has('norisring')) this.buildNorisring()
   }
 
   private buildDecor() {
     this.scene.add(this.fenceGroup)
     this.rebuildFence(9, 11)
+  }
+
+  /** NoRiseRing north of the farm fence on the expanded grass. */
+  private buildNorisring() {
+    // Always rebuild so asphalt / layout edits apply after reload
+    this.removeNorisring()
+
+    const gap = 4
+    // Rotate 180° so the pit entrance (local +Z tip) faces the farm
+    const rotY = Math.PI
+    const x = 8
+    const z = this.fenceNorth + gap + NORISRING_HALF_Z + 20
+
+    const track = makeNorisring()
+    track.position.set(x, 0, z)
+    track.rotation.y = rotY
+    this.scene.add(track)
+
+    const cos = Math.cos(rotY)
+    const sin = Math.sin(rotY)
+    const mapXZ = (lx: number, lz: number) => ({
+      x: x + lx * cos + lz * sin,
+      z: z - lx * sin + lz * cos,
+    })
+
+    const localWalls = (track.userData.walls as TrackWallSeg[] | undefined) ?? []
+    this.solidWalls = localWalls.map((w) => {
+      const a = mapXZ(w.ax, w.az)
+      const b = mapXZ(w.bx, w.bz)
+      return { ax: a.x, az: a.z, bx: b.x, bz: b.z, halfT: w.halfT }
+    })
+
+    const ent = track.userData.entrance as { x: number; z: number } | undefined
+    if (ent) {
+      const gate = mapXZ(ent.x, ent.z)
+      const wx = gate.x
+      const wz = gate.z
+      const laneX = this.norisringLaneX()
+      const dirtMat = new THREE.MeshLambertMaterial({ color: COLORS.dirt })
+
+      const zFarm = -5.2
+      const zGate = wz - 1.4
+      const runLen = Math.max(2, zGate - zFarm)
+      const run = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.035, runLen), dirtMat)
+      run.name = 'norisring-approach'
+      run.position.set(laneX, 0.02, (zFarm + zGate) * 0.5)
+      this.scene.add(run)
+
+      const spurLen = Math.max(1.2, Math.abs(wx - laneX))
+      const spur = new THREE.Mesh(new THREE.BoxGeometry(spurLen, 0.035, 2.4), dirtMat)
+      spur.name = 'norisring-approach-spur'
+      spur.position.set((wx + laneX) * 0.5, 0.02, wz - 1.2)
+      this.scene.add(spur)
+    }
+
+    const label = makeLabelSprite('NoRiseRing', '#ffffff')
+    label.name = 'norisring-label'
+    label.position.set(x, 6.5, z)
+    label.scale.set(5.5, 1.4, 1)
+    this.scene.add(label)
+  }
+
+  private removeNorisring() {
+    for (const name of ['norisring', 'norisring-approach', 'norisring-approach-spur', 'norisring-label']) {
+      const obj = this.scene.getObjectByName(name)
+      if (!obj) continue
+      this.scene.remove(obj)
+      obj.traverse((child) => {
+        const mesh = child as THREE.Mesh
+        if (!mesh.isMesh) return
+        mesh.geometry?.dispose()
+        const mat = mesh.material
+        if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
+        else mat?.dispose()
+      })
+    }
+    this.solidWalls = []
+  }
+
+  /** X corridor between FIELD and WHEAT — Norisring approach + north fence gap. */
+  private norisringLaneX() {
+    const fieldEast = this.fieldCenter.x + 4.2
+    const wheatWest = this.fieldCenter2.x - 3.2
+    return (fieldEast + wheatWest) * 0.5
+  }
+
+  /** Push the player out of thin wall segments (XZ capsule vs segment). */
+  private resolveSolidWalls(pos: THREE.Vector3, radius = 0.42) {
+    for (const w of this.solidWalls) {
+      const abx = w.bx - w.ax
+      const abz = w.bz - w.az
+      const lenSq = abx * abx + abz * abz
+      if (lenSq < 1e-8) continue
+      let t = ((pos.x - w.ax) * abx + (pos.z - w.az) * abz) / lenSq
+      t = THREE.MathUtils.clamp(t, 0, 1)
+      const cx = w.ax + abx * t
+      const cz = w.az + abz * t
+      let dx = pos.x - cx
+      let dz = pos.z - cz
+      const dist = Math.hypot(dx, dz)
+      const minDist = radius + w.halfT
+      if (dist >= minDist || dist < 1e-8) {
+        if (dist < 1e-8) {
+          // Sitting on the segment — push along segment normal
+          const nx = -abz
+          const nz = abx
+          const nl = Math.hypot(nx, nz) || 1
+          pos.x += (nx / nl) * minDist
+          pos.z += (nz / nl) * minDist
+        }
+        continue
+      }
+      const push = (minDist - dist) / dist
+      pos.x += dx * push
+      pos.z += dz * push
+    }
+  }
+
+  /** Keep the driven car from overlapping the other parked car. */
+  private resolveCarVsCar(pos: THREE.Vector3, driven: THREE.Group) {
+    const other = driven === this.raceCar ? this.superCar : this.raceCar
+    if (!other) return
+    const rSelf = driven === this.superCar ? SUPER_CAR_RADIUS : RACE_CAR_RADIUS
+    const rOther = other === this.superCar ? SUPER_CAR_RADIUS : RACE_CAR_RADIUS
+    const minDist = rSelf + rOther
+    let dx = pos.x - other.position.x
+    let dz = pos.z - other.position.z
+    let dist = Math.hypot(dx, dz)
+    if (dist >= minDist) return
+    if (dist < 1e-6) {
+      dx = 1
+      dz = 0
+      dist = 1
+    }
+    const push = (minDist - dist) / dist
+    pos.x += dx * push
+    pos.z += dz * push
   }
 
   private rebuildFence(east: number, northZ: number, west?: number) {
@@ -423,10 +607,13 @@ export class Game {
     const n = northZ
     const south = -Math.max(e, w)
     const gates: { x: number; half: number; label: string }[] = [
-      { x: 0, half: 1.8, label: 'ENTER' },
+      { x: 0, half: 1.8, label: '' },
     ]
-    if (e >= 14) gates.push({ x: 12, half: 1.8, label: 'ENTER-B' })
-    if (this.unlocked.has('train')) gates.push({ x: BELT_X, half: 2.6, label: 'TRAIN' })
+    if (e >= 14) gates.push({ x: 12, half: 1.8, label: '' })
+    if (this.unlocked.has('train')) gates.push({ x: BELT_X, half: 2.6, label: '' })
+    if (this.unlocked.has('norisring')) {
+      gates.push({ x: this.norisringLaneX(), half: 1.9, label: '' })
+    }
 
     this.fenceGroup.add(makeFence(-w, south, e, south))
     this.fenceGroup.add(makeFence(-w, south, -w, n))
@@ -447,10 +634,12 @@ export class Game {
         post.position.set(x, 0.6, n)
         this.fenceGroup.add(post)
       }
-      const gateLabel = makeLabelSprite(gate.label, '#ffffff')
-      gateLabel.position.set(gate.x, 1.4, n)
-      gateLabel.scale.set(gate.label === 'ENTER-B' ? 1.8 : 1.6, 0.6, 1)
-      this.fenceGroup.add(gateLabel)
+      if (gate.label) {
+        const gateLabel = makeLabelSprite(gate.label, '#ffffff')
+        gateLabel.position.set(gate.x, 1.4, n)
+        gateLabel.scale.set(gate.label === 'ENTER-B' ? 1.8 : 1.6, 0.6, 1)
+        this.fenceGroup.add(gateLabel)
+      }
       cursor = right
     }
     if (cursor < e - 0.05) this.fenceGroup.add(makeFence(cursor, n, e, n))
@@ -540,17 +729,58 @@ export class Game {
     }
   }
 
-  private trainLeaveZ() {
-    return RAIL_Z_END
+  private trainLeavePos(): THREE.Vector3 {
+    const westX = -GROUND_HALF + 6
+    return new THREE.Vector3(westX, 0, TRAIN_CURVE_Z0 + TRAIN_CURVE_R)
+  }
+
+  /** Curve from depot wait (u=0) north, then quarter-turn west to the grass edge (u=1). */
+  private buildTrainCurve(): THREE.CatmullRomCurve3 {
+    const wait = TRAIN_WAIT.clone()
+    const R = TRAIN_CURVE_R
+    const z0 = TRAIN_CURVE_Z0
+    const cx = BELT_X - R
+    const cz = z0
+    const leave = this.trainLeavePos()
+    const pts: THREE.Vector3[] = [
+      wait,
+      new THREE.Vector3(BELT_X, 0, (wait.z + z0) * 0.5),
+      new THREE.Vector3(BELT_X, 0, z0),
+    ]
+    for (let i = 1; i <= 12; i++) {
+      const a = (Math.PI / 2) * (i / 12)
+      pts.push(new THREE.Vector3(cx + R * Math.cos(a), 0, cz + R * Math.sin(a)))
+    }
+    pts.push(new THREE.Vector3((leave.x + (BELT_X - R)) * 0.5, 0, leave.z))
+    pts.push(leave)
+    return new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.15)
   }
 
   private syncTrainLeavePosition() {
-    if (!this.train) return
-    this.train.leavePos.set(this.train.waitPos.x, 0, this.trainLeaveZ())
+    if (!this.train || !this.trainCurve) return
+    this.trainCurve = this.buildTrainCurve()
+    const leave = this.trainCurve.getPoint(1)
+    this.train.leavePos.copy(leave)
+    this.rebuildTrainRails()
     if (this.train.state === 'arrive') {
-      this.train.mesh.position.x = this.train.waitPos.x
-      this.train.mesh.position.z = Math.max(this.train.mesh.position.z, this.train.leavePos.z - 0.5)
+      this.train.pathU = Math.max(this.train.pathU, 0.85)
+      const p = this.trainCurve.getPoint(this.train.pathU)
+      this.train.mesh.position.set(p.x, 0, p.z)
+    } else if (this.train.state === 'respawn' || this.train.state === 'leave') {
+      this.train.mesh.position.copy(this.train.leavePos)
+      this.train.pathU = 1
     }
+  }
+
+  private rebuildTrainRails() {
+    if (this.trainRailsGroup) this.scene.remove(this.trainRailsGroup)
+    if (!this.trainCurve) return
+    this.trainRailsGroup = makeTrainRailsAlong(this.trainCurve, 140)
+    const stubLen = Math.max(1, TRAIN_WAIT.z - RAIL_Z_START)
+    const stub = makeTrainRails(stubLen)
+    stub.position.set(BELT_X, 0, (RAIL_Z_START + TRAIN_WAIT.z) / 2)
+    this.trainRailsGroup.add(stub)
+    this.scene.add(this.trainRailsGroup)
   }
 
   private buildCounterArea() {
@@ -596,6 +826,7 @@ export class Game {
       halfD,
       kind: 'crop',
     }
+    this.syncFieldCapacity(pile)
     this.rebuildFieldGround(pile)
     this.rebuildCropVisual(pile)
     this.crops.push(pile)
@@ -672,6 +903,7 @@ export class Game {
       crop.pos.z = cz
       crop.mesh.position.set(crop.pos.x, 0.14, cz)
       this.fieldCenter.z = cz
+      this.syncFieldCapacity(crop)
       this.rebuildFieldGround(crop)
       this.rebuildCropVisual(crop)
       if (this.cropIrrigationTier > 0) this.syncIrrigation('crop', this.cropIrrigationTier as 1 | 2)
@@ -683,6 +915,7 @@ export class Game {
       wheat.pos.z = cz
       wheat.mesh.position.set(wheat.pos.x, 0.14, cz)
       this.fieldCenter2.z = cz
+      this.syncFieldCapacity(wheat)
       this.rebuildWheatGround(wheat)
       this.rebuildCropVisual(wheat)
       if (this.wheatIrrigationTier > 0) this.syncIrrigation('wheat', this.wheatIrrigationTier as 1 | 2)
@@ -748,23 +981,35 @@ export class Game {
     return this.crops.find((c) => c.kind === 'wheat') ?? null
   }
 
+  /** Plant grid at fixed spacing — density stays the same as fields grow. */
+  private fieldPlantGrid(pile: CropPile) {
+    const colSpacing = 0.85
+    const rowSpacing = 0.65
+    const cols = Math.max(1, Math.floor((pile.halfW * 2) / colSpacing))
+    const rows = Math.max(1, Math.floor((pile.halfD * 2) / rowSpacing))
+    return { cols, rows, capacity: cols * rows, colSpacing, rowSpacing }
+  }
+
+  /** Cap matches every plant slot so the field can fill completely. */
+  private syncFieldCapacity(pile: CropPile) {
+    const { capacity } = this.fieldPlantGrid(pile)
+    pile.max = capacity
+    if (pile.count > pile.max) pile.count = pile.max
+  }
+
   private boostField(opts: { max?: number; regen?: number; fillRatio?: number; kind?: 'crop' | 'wheat' }) {
     const field =
       opts.kind === 'wheat' ? this.getWheatField() : this.getField()
     if (!field) return
-    if (opts.max !== undefined) field.max = Math.max(field.max, opts.max)
     if (opts.regen !== undefined) field.regen = Math.min(field.regen, opts.regen)
+    this.syncFieldCapacity(field)
     const fill = opts.fillRatio ?? 0.35
     field.count = Math.min(field.max, Math.max(field.count, Math.floor(field.max * fill)))
     this.rebuildCropVisual(field)
   }
 
   private rebuildCropVisual(pile: CropPile) {
-    const colSpacing = 0.85
-    const rowSpacing = 0.65
-    const cols = Math.max(8, Math.floor((pile.halfW * 2) / colSpacing))
-    const rows = Math.max(6, Math.floor((pile.halfD * 2) / rowSpacing))
-    const maxShow = cols * rows
+    const { cols, rows, capacity: maxShow, colSpacing, rowSpacing } = this.fieldPlantGrid(pile)
     const show = Math.min(maxShow, pile.count)
 
     while (pile.mesh.children.length > show) {
@@ -804,6 +1049,9 @@ export class Game {
     )
     this.unlockPads.push(
       this.createUnlockPad('tractor', 200, new THREE.Vector3(-6.8, 0, -8.8), '🚜', 'plots'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('tractorUp', 380, new THREE.Vector3(-6.6, 0, 3.2), '🚛', 'tractor'),
     )
     this.unlockPads.push(
       this.createUnlockPad('helper', 320, new THREE.Vector3(-3.2, 0, -1.0), '👷', 'tractor'),
@@ -922,6 +1170,15 @@ export class Game {
     this.unlockPads.push(
       this.createUnlockPad('portal3', 9000, new THREE.Vector3(-12.4, 0, 4.2), '🌀', 'portal2'),
     )
+    this.unlockPads.push(
+      this.createUnlockPad('norisring', 8000, new THREE.Vector3(0, 0, 4.8), '🏎️', 'mapExpand'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('raceCar', 3500, new THREE.Vector3(3.0, 0, 30.2), '🚗', 'norisring'),
+    )
+    this.unlockPads.push(
+      this.createUnlockPad('superCar', 9000, new THREE.Vector3(-1.0, 0, 30.2), '🏎️', 'raceCar'),
+    )
     this.refreshPadVisibility()
   }
 
@@ -1031,29 +1288,71 @@ export class Game {
   }
 
   private updatePlayer(dt: number) {
+    this.carInteractCd = Math.max(0, this.carInteractCd - dt)
+    this.tryRaceCarInteract()
+
     const m = this.input.move
+    const driving = this.drivenCar
+    const speed = driving
+      ? driving === this.superCar
+        ? SUPER_CAR_SPEED
+        : RACE_CAR_SPEED
+      : PLAYER_SPEED * this.playerSpeedMul
     if (m.x !== 0 || m.y !== 0) {
       const forward = new THREE.Vector3(-1, 0, -1).normalize()
       const right = new THREE.Vector3(1, 0, -1).normalize()
       const dir = forward.multiplyScalar(-m.y).add(right.multiplyScalar(m.x))
       if (dir.lengthSq() > 0) {
         dir.normalize()
-        this.player.position.x += dir.x * PLAYER_SPEED * this.playerSpeedMul * dt
-        this.player.position.z += dir.z * PLAYER_SPEED * this.playerSpeedMul * dt
-        this.player.rotation.y = Math.atan2(dir.x, dir.z)
+        this.player.position.x += dir.x * speed * dt
+        this.player.position.z += dir.z * speed * dt
+        const yaw = Math.atan2(dir.x, dir.z)
+        this.player.rotation.y = yaw
+        if (driving) driving.rotation.y = yaw
       }
     }
-    this.player.position.x = THREE.MathUtils.clamp(this.player.position.x, -this.mapMaxWest, this.mapMax)
-    const zBound = Math.max(this.mapMax, this.mapMaxWest)
-    this.player.position.z = THREE.MathUtils.clamp(this.player.position.z, -zBound, this.mapMax + 2)
+    const edge = GROUND_HALF - 0.45
+    this.player.position.x = THREE.MathUtils.clamp(this.player.position.x, -edge, edge)
+    this.player.position.z = THREE.MathUtils.clamp(this.player.position.z, -edge, edge)
+    if (this.solidWalls.length) this.resolveSolidWalls(this.player.position)
+    if (driving) this.resolveCarVsCar(this.player.position, driving)
+
+    if (driving) {
+      driving.position.x = this.player.position.x
+      driving.position.z = this.player.position.z
+      const moving = m.x !== 0 || m.y !== 0
+      // Bounce only for the regular car; hypercar stays planted
+      if (driving === this.raceCar && moving) {
+        const bounce = Math.sin(this.clock.elapsedTime * 10)
+        const sy = 1 + bounce * 0.42
+        const sxz = 1 / Math.sqrt(Math.max(0.55, sy))
+        driving.scale.set(sxz, sy, sxz)
+        driving.position.y = Math.max(0, (sy - 1) * 0.35)
+      } else if (driving === this.raceCar) {
+        driving.scale.lerp(new THREE.Vector3(1, 1, 1), Math.min(1, 12 * dt))
+        driving.position.y = THREE.MathUtils.lerp(driving.position.y, 0, Math.min(1, 12 * dt))
+      } else {
+        driving.scale.set(1, 1, 1)
+        driving.position.y = 0
+      }
+    } else {
+      if (this.raceCar) {
+        this.raceCar.scale.set(1, 1, 1)
+        this.raceCar.position.y = 0
+      }
+      if (this.superCar) {
+        this.superCar.scale.set(1, 1, 1)
+        this.superCar.position.y = 0
+      }
+    }
 
     const t = this.clock.elapsedTime
     this.stackRoot.rotation.z = Math.sin(t * 8) * 0.04 * Math.min(this.stack.length, 10)
     this.stackRoot.rotation.x = Math.cos(t * 6) * 0.03 * Math.min(this.stack.length, 10)
 
-    // Pick from fields (one item at a time)
+    // Pick from fields (one item at a time) — on foot only
     this.harvestCooldown -= dt
-    if (this.stack.length < this.maxStack && this.harvestCooldown <= 0) {
+    if (!driving && this.stack.length < this.maxStack && this.harvestCooldown <= 0) {
       for (const field of this.crops) {
         if (field.count > 0 && this.inField(this.player.position, field)) {
           field.count--
@@ -1066,7 +1365,7 @@ export class Game {
     }
 
     // Pick from ground stacks (tractor dumps / processor out)
-    if (this.stack.length < this.maxStack) {
+    if (!driving && this.stack.length < this.maxStack) {
       for (const gs of this.groundStacks) {
         if (gs.kinds.length === 0) continue
         if (this.player.position.distanceTo(gs.pos) < 1.5) {
@@ -1078,16 +1377,80 @@ export class Game {
       }
     }
 
-    if (this.stack.length > 0 && this.player.position.distanceTo(this.sellZoneCenter) < 1.4) {
+    if (!driving && this.stack.length > 0 && this.player.position.distanceTo(this.sellZoneCenter) < 1.4) {
       this.depositToCounter()
     }
     if (
+      !driving &&
       this.shop2Ready &&
       this.stack.length > 0 &&
       this.player.position.distanceTo(this.sellZone2) < 1.4
     ) {
       this.depositToCounter2()
     }
+  }
+
+  private spawnRaceCar() {
+    if (this.raceCar) return
+    const car = makeRaceCar()
+    const x = this.norisringLaneX()
+    car.position.set(x, 0, this.fenceNorth + 2.2)
+    this.scene.add(car)
+    this.raceCar = car
+  }
+
+  private spawnSuperCar() {
+    if (this.superCar) return
+    const car = makeSuperRaceCar()
+    const x = this.norisringLaneX()
+    car.position.set(x + 3.2, 0, this.fenceNorth + 2.2)
+    this.scene.add(car)
+    this.superCar = car
+  }
+
+  private tryRaceCarInteract() {
+    if (this.carInteractCd > 0) return
+    const want =
+      this.input.keys.has('Space') || this.input.keys.has('KeyE')
+    if (!want) return
+    this.carInteractCd = 0.35
+    if (this.drivenCar) {
+      this.exitRaceCar()
+      return
+    }
+    let nearest: THREE.Group | null = null
+    let best = 2.2
+    for (const car of [this.raceCar, this.superCar]) {
+      if (!car) continue
+      const d = this.player.position.distanceTo(car.position)
+      if (d < best) {
+        best = d
+        nearest = car
+      }
+    }
+    if (nearest) this.enterRaceCar(nearest)
+  }
+
+  private enterRaceCar(car: THREE.Group) {
+    if (this.drivenCar) return
+    this.drivenCar = car
+    this.player.visible = false
+    this.player.position.x = car.position.x
+    this.player.position.z = car.position.z
+    this.player.rotation.y = car.rotation.y
+    const label = car === this.superCar ? 'Hypercar' : 'Car'
+    this.setHint(`${label} — Space / E to exit`)
+  }
+
+  private exitRaceCar() {
+    if (!this.drivenCar) return
+    const car = this.drivenCar
+    this.drivenCar = null
+    this.player.visible = true
+    const side = new THREE.Vector3(1.1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), car.rotation.y)
+    this.player.position.x = car.position.x + side.x
+    this.player.position.z = car.position.z + side.z
+    this.setHint('Left the car')
   }
 
   private pushStack(kind: ItemKind, root = this.stackRoot, list = this.stack) {
@@ -1158,19 +1521,25 @@ export class Game {
     }
   }
 
-  private getOrCreateGroundStack(pos: THREE.Vector3): GroundStack {
+  private getOrCreateGroundStack(pos: THREE.Vector3, mode: 'dump' | 'pile' = 'pile'): GroundStack {
     let gs = this.groundStacks.find((g) => g.pos.distanceTo(pos) < 0.5)
     if (!gs) {
       const mesh = new THREE.Group()
       mesh.position.copy(pos)
       this.scene.add(mesh)
-      gs = { mesh, kinds: [], pos: pos.clone() }
+      gs = { mesh, kinds: [], pos: pos.clone(), mode }
       this.groundStacks.push(gs)
+    } else if (mode === 'dump') {
+      gs.mode = 'dump'
     }
     return gs
   }
 
   private rebuildGroundStack(gs: GroundStack) {
+    if (gs.mode === 'dump') {
+      this.rebuildDumpStack(gs)
+      return
+    }
     const show = Math.min(gs.kinds.length, 12)
     while (gs.mesh.children.length > show) {
       gs.mesh.remove(gs.mesh.children[gs.mesh.children.length - 1]!)
@@ -1179,6 +1548,41 @@ export class Game {
       const i = gs.mesh.children.length
       const item = makeItem(gs.kinds[i]!)
       item.position.set(((i % 3) - 1) * 0.4, 0.2 + Math.floor(i / 3) * 0.32, 0)
+      gs.mesh.add(item)
+    }
+  }
+
+  /** Fill dump as a sandbox grid: cols × 12 rows, up to 4 items stacked per cell. */
+  private rebuildDumpStack(gs: GroundStack) {
+    const show = Math.min(gs.kinds.length, DUMP_CAPACITY)
+    const spanX = DUMP_PAD_X - 1.0
+    const spanZ = DUMP_PAD_Z - 1.0
+    const stepX = DUMP_COLS > 1 ? spanX / (DUMP_COLS - 1) : 0
+    const stepZ = DUMP_ROWS > 1 ? spanZ / (DUMP_ROWS - 1) : 0
+    const baseY = 0.34
+
+    while (gs.mesh.children.length > show) {
+      gs.mesh.remove(gs.mesh.children[gs.mesh.children.length - 1]!)
+    }
+    const place = (item: THREE.Object3D, i: number) => {
+      // Fill each cell up to 4 high before moving to the next point
+      const layer = i % DUMP_LAYERS
+      const cell = Math.floor(i / DUMP_LAYERS)
+      const col = cell % DUMP_COLS
+      const row = Math.floor(cell / DUMP_COLS)
+      item.position.set(
+        (col - (DUMP_COLS - 1) / 2) * stepX,
+        baseY + layer * 0.34,
+        (row - (DUMP_ROWS - 1) / 2) * stepZ,
+      )
+    }
+    for (let i = 0; i < gs.mesh.children.length; i++) {
+      place(gs.mesh.children[i]!, i)
+    }
+    while (gs.mesh.children.length < show) {
+      const i = gs.mesh.children.length
+      const item = makeItem(gs.kinds[i]!)
+      place(item, i)
       gs.mesh.add(item)
     }
   }
@@ -1394,10 +1798,11 @@ export class Game {
   }
 
   private updateUnlocks(dt: number) {
+    if (this.drivenCar) return
     for (const pad of this.unlockPads) {
       if (!pad.active || pad.done) continue
       if (this.player.position.distanceTo(pad.mesh.position) < 1.3 && this.money > 0) {
-        const rate = 55 * dt
+        const rate = (this.unlocked.has('plots') ? 250 : 75) * dt
         const pay = Math.min(this.money, rate, pad.cost - pad.paid)
         this.money -= pay
         pad.paid += pay
@@ -1433,13 +1838,19 @@ export class Game {
       this.spawnTractor()
       this.boostField({ max: 30, regen: 0.55, fillRatio: 0.45 })
       this.stage = Math.max(this.stage, 3)
-      const dumpPad = makeZonePlane(1.6, 1.6, 0xfbbf24, 0.3)
-      dumpPad.position.set(this.dumpPos.x, 0.04, this.dumpPos.z)
-      this.scene.add(dumpPad)
-      const dumpLabel = makeLabelSprite('DUMP', '#ffe08a')
-      dumpLabel.position.set(this.dumpPos.x, 0.85, this.dumpPos.z)
-      this.scene.add(dumpLabel)
-      if (!silent) this.setHint('Tractor harvests the field → DUMP. Hire a helper!')
+      if (!this.scene.getObjectByName('dumpSandbox')) {
+        const dump = makeDumpSandbox(DUMP_PAD_X, DUMP_PAD_Z)
+        dump.position.set(this.dumpPos.x, 0, this.dumpPos.z)
+        this.scene.add(dump)
+        this.getOrCreateGroundStack(this.dumpPos, 'dump')
+      }
+      if (!silent) this.setHint('Tractor harvests the field → DUMP sandbox. Hire a helper!')
+    }
+
+    if (id === 'tractorUp') {
+      this.upgradeTractor()
+      this.stage = Math.max(this.stage, 3)
+      if (!silent) this.setHint('Tractor trailer attached — hauls a bigger load to DUMP!')
     }
 
     if (id === 'helper') {
@@ -1475,7 +1886,7 @@ export class Game {
 
     if (id === 'barn') {
       const barn = makeBarn()
-      barn.position.set(-8.5, 0, -5.8)
+      barn.position.set(-8.0, 0, -6.8)
       this.scene.add(barn)
       this.boostField({ max: 45, regen: 0.35, fillRatio: 0.6 })
       this.rebuildFence(11, 11)
@@ -1714,6 +2125,25 @@ export class Game {
       if (!silent) this.setHint('All three portals stacked — mega goods!')
     }
 
+    if (id === 'norisring') {
+      this.buildNorisring()
+      this.rebuildFence(this.fenceExtent, this.fenceNorth)
+      this.stage = Math.max(this.stage, 35)
+      if (!silent) this.setHint('NoRiseRing built north of the farm!')
+    }
+
+    if (id === 'raceCar') {
+      this.spawnRaceCar()
+      this.stage = Math.max(this.stage, 36)
+      if (!silent) this.setHint('Car ready! Walk up and press Space to drive / exit')
+    }
+
+    if (id === 'superCar') {
+      this.spawnSuperCar()
+      this.stage = Math.max(this.stage, 37)
+      if (!silent) this.setHint('Hypercar unlocked — much faster! Space / E to drive')
+    }
+
     this.stageEl.textContent = String(this.stage)
     if (!this.loadingSave) this.saveProgress()
   }
@@ -1732,17 +2162,51 @@ export class Game {
     this.tractor = {
       mesh,
       cargo: [],
+      capacity: TRACTOR_CARGO_BASE,
       state: 'seek',
       targetPile: null,
       timer: 0,
     }
   }
 
+  private upgradeTractor() {
+    this.spawnTractor()
+    const tr = this.tractor
+    if (!tr) return
+    tr.capacity = Math.max(tr.capacity, TRACTOR_CARGO_UP)
+    attachTractorTrailer(tr.mesh)
+  }
+
+  private placeTractorCargoVisual(tr: TractorAI, item: THREE.Object3D) {
+    const bedCargo = tr.mesh.getObjectByName('cargo') as THREE.Group
+    const trailerCargo = tr.mesh.getObjectByName('trailerCargo') as THREE.Group | null
+    const bedMax = 8
+    const n = tr.cargo.length // already pushed
+    if (!trailerCargo || n <= bedMax) {
+      const i = bedCargo.children.length
+      item.position.set(((i % 2) - 0.5) * 0.35, Math.floor(i / 2) * 0.28, 0)
+      bedCargo.add(item)
+      return
+    }
+    const i = trailerCargo.children.length
+    const col = i % 3
+    const row = Math.floor(i / 3) % 3
+    const layer = Math.floor(i / 9)
+    item.position.set((col - 1) * 0.38, layer * 0.3, (row - 1) * 0.4)
+    trailerCargo.add(item)
+  }
+
+  private clearTractorCargoVisual(tr: TractorAI) {
+    const bedCargo = tr.mesh.getObjectByName('cargo') as THREE.Group | undefined
+    const trailerCargo = tr.mesh.getObjectByName('trailerCargo') as THREE.Group | undefined
+    if (bedCargo) while (bedCargo.children.length) bedCargo.remove(bedCargo.children[0]!)
+    if (trailerCargo) while (trailerCargo.children.length) trailerCargo.remove(trailerCargo.children[0]!)
+  }
+
   private updateTractor(dt: number) {
     const tr = this.tractor
     if (!tr) return
 
-    const cargoRoot = tr.mesh.getObjectByName('cargo') as THREE.Group
     const field = this.getField()
 
     if (tr.state === 'seek') {
@@ -1758,27 +2222,25 @@ export class Game {
       }
     } else if (tr.state === 'harvest') {
       tr.timer += dt
-      if (field.count <= 0 || tr.cargo.length >= 14) {
+      if (field.count <= 0 || tr.cargo.length >= tr.capacity) {
         tr.state = 'dump'
         return
       }
-      if (tr.timer >= 0.18) {
+      if (tr.timer >= 0.13) {
         tr.timer = 0
         field.count--
         this.rebuildCropVisual(field)
         tr.cargo.push('crop')
-        const item = makeCropItem()
-        item.position.y = (tr.cargo.length - 1) * 0.28
-        cargoRoot.add(item)
+        this.placeTractorCargoVisual(tr, makeCropItem())
       }
     } else if (tr.state === 'dump') {
       this.moveToward(tr.mesh, this.dumpPos, 4.8 * dt)
-      if (tr.mesh.position.distanceTo(this.dumpPos) < 1.2) {
-        const gs = this.getOrCreateGroundStack(this.dumpPos)
-        while (tr.cargo.length && gs.kinds.length < 30) {
+      if (tr.mesh.position.distanceTo(this.dumpPos) < 1.85) {
+        const gs = this.getOrCreateGroundStack(this.dumpPos, 'dump')
+        while (tr.cargo.length && gs.kinds.length < DUMP_CAPACITY) {
           gs.kinds.push(tr.cargo.pop()!)
         }
-        while (cargoRoot.children.length) cargoRoot.remove(cargoRoot.children[0]!)
+        this.clearTractorCargoVisual(tr)
         this.rebuildGroundStack(gs)
         tr.state = 'seek'
         tr.targetPile = null
@@ -2095,12 +2557,12 @@ export class Game {
     const mesh = makeTruck()
     mesh.position.copy(st.leavePos)
     this.scene.add(mesh)
-    const label = makeLabelSprite('0/8', '#ffffff')
+    const label = makeLabelSprite('0/40', '#ffffff')
     label.position.set(0, 2.2, 0)
     mesh.add(label)
     st.truck = {
       mesh,
-      need: 8,
+      need: 40,
       filled: 0,
       state: 'arrive',
       waitPos: st.waitPos.clone(),
@@ -2135,11 +2597,18 @@ export class Game {
     t.filled++
     const cargo = t.mesh.getObjectByName('cargo') as THREE.Group
     const item = makeItem(kind)
+    const i = t.filled - 1
+    const cols = 4
+    const rows = 5
+    const col = i % cols
+    const row = Math.floor(i / cols) % rows
+    const layer = Math.floor(i / (cols * rows))
     item.position.set(
-      ((t.filled - 1) % 3) * 0.35 - 0.35,
-      Math.floor((t.filled - 1) / 3) * 0.32,
-      0,
+      (col - (cols - 1) / 2) * 0.32,
+      0.15 + layer * 0.3,
+      (row - (rows - 1) / 2) * 0.32,
     )
+    item.scale.setScalar(0.75)
     cargo.add(item)
     this.refreshTruckLabel(t)
     return true
@@ -2246,19 +2715,16 @@ export class Game {
     this.scene.add(group)
     this.conveyorGroup = group
     this.conveyorReady = true
-    const label = makeLabelSprite('BELT', '#94a3b8')
-    label.position.set(BELT_X - 1.6, 1.2, 1)
-    this.scene.add(label)
   }
 
   private spawnTrain() {
     if (this.train) return
+    this.trainCurve = this.buildTrainCurve()
     const waitPos = TRAIN_WAIT.clone()
-    const leavePos = new THREE.Vector3(waitPos.x, 0, this.trainLeaveZ())
+    const leavePos = this.trainCurve.getPoint(1).clone()
     const mesh = makeTrain()
     mesh.position.copy(leavePos)
-    // Cabin/front on local −X → world +Z (north). Cargo on +X faces south into the depot.
-    mesh.rotation.y = Math.PI / 2
+    mesh.rotation.y = Math.atan2(-1, 0) + Math.PI / 2 // face west at leave
     this.scene.add(mesh)
     const label = makeLabelSprite(`0/${this.trainCapacity}`, '#ffffff')
     label.position.set(0, 2.4, 0)
@@ -2267,14 +2733,8 @@ export class Game {
     const depot = makeTrainDepot()
     depot.position.copy(DEPOT_POS)
     this.scene.add(depot)
-    const depotLabel = makeLabelSprite('DEPOT', '#fde68a')
-    depotLabel.position.set(DEPOT_POS.x, 3.2, DEPOT_POS.z)
-    this.scene.add(depotLabel)
 
-    const railLen = RAIL_Z_END - RAIL_Z_START
-    const rails = makeTrainRails(railLen)
-    rails.position.set(BELT_X, 0, (RAIL_Z_START + RAIL_Z_END) / 2)
-    this.scene.add(rails)
+    this.rebuildTrainRails()
 
     const moneyPad = makeZonePlane(1.4, 1.4, 0x94a3b8, 0.35)
     moneyPad.position.set(this.trainMoneyPos.x, 0.04, this.trainMoneyPos.z)
@@ -2287,6 +2747,7 @@ export class Game {
       cargoCount: 0,
       waitPos,
       leavePos,
+      pathU: 1,
       label,
       loadCooldown: 0,
       respawn: 0,
@@ -2294,16 +2755,22 @@ export class Game {
     this.refreshTrainLabel()
   }
 
-  /** Slide train without turning — always nose north (back into station, drive out forward). */
-  private moveTrain(mesh: THREE.Object3D, target: THREE.Vector3, step: number) {
-    const dx = target.x - mesh.position.x
-    const dz = target.z - mesh.position.z
-    const dist = Math.hypot(dx, dz)
-    if (dist < 0.05) return
-    const s = Math.min(step, dist)
-    mesh.position.x += (dx / dist) * s
-    mesh.position.z += (dz / dist) * s
-    mesh.rotation.y = Math.PI / 2
+  /** Follow depot→west curve. Nose always toward leave (u=1); arrive backs in. */
+  private moveTrainOnCurve(tr: TrainAI, targetU: number, step: number) {
+    const curve = this.trainCurve
+    if (!curve) return
+    const len = Math.max(curve.getLength(), 1)
+    const du = step / len
+    if (tr.pathU < targetU) tr.pathU = Math.min(targetU, tr.pathU + du)
+    else if (tr.pathU > targetU) tr.pathU = Math.max(targetU, tr.pathU - du)
+    const p = curve.getPoint(tr.pathU)
+    tr.mesh.position.set(p.x, 0, p.z)
+    const tang = curve.getTangent(tr.pathU)
+    if (tang.lengthSq() > 1e-8) {
+      tang.normalize()
+      // Nose is local −X; align with +tangent (toward leave / west-north)
+      tr.mesh.rotation.y = Math.atan2(tang.x, tang.z) + Math.PI / 2
+    }
   }
 
   private refreshTrainLabel() {
@@ -2335,9 +2802,6 @@ export class Game {
     gate.position.set(BELT_X, 0, PORTAL_ZS[index]!)
     this.scene.add(gate)
     this.portalMeshes[index] = gate
-    const label = makeLabelSprite(`PORTAL ${index + 1}`, '#e9d5ff')
-    label.position.set(BELT_X + 1.7, 1.5, PORTAL_ZS[index]!)
-    this.scene.add(label)
   }
 
   private spawnGoodsOnBelt() {
@@ -2402,6 +2866,7 @@ export class Game {
     if (t.state === 'respawn') {
       t.respawn -= dt
       if (t.respawn <= 0) {
+        t.pathU = 1
         t.mesh.position.copy(t.leavePos)
         t.cargoValue = 0
         t.cargoCount = 0
@@ -2415,9 +2880,13 @@ export class Game {
     }
 
     if (t.state === 'arrive') {
-      // Reverse south into the bay (nose stays north)
-      this.moveTrain(t.mesh, t.waitPos, 5.5 * dt)
-      if (t.mesh.position.distanceTo(t.waitPos) < 0.3) t.state = 'wait'
+      // Back in along the curve (nose toward leave / west-north)
+      this.moveTrainOnCurve(t, 0, 5.5 * dt)
+      if (t.pathU <= 0.02 || t.mesh.position.distanceTo(t.waitPos) < 0.35) {
+        t.pathU = 0
+        t.mesh.position.copy(t.waitPos)
+        t.state = 'wait'
+      }
       return
     }
 
@@ -2466,9 +2935,9 @@ export class Game {
     }
 
     if (t.state === 'leave') {
-      // Drive forward north (same heading)
-      this.moveTrain(t.mesh, t.leavePos, 6.5 * dt)
-      if (t.mesh.position.distanceTo(t.leavePos) < 0.4) {
+      this.moveTrainOnCurve(t, 1, 6.5 * dt)
+      if (t.pathU >= 0.98 || t.mesh.position.distanceTo(t.leavePos) < 0.5) {
+        t.pathU = 1
         this.scene.remove(t.mesh)
         t.state = 'respawn'
         t.respawn = 5
@@ -3161,8 +3630,8 @@ export class Game {
       for (const f of data.fields ?? []) {
         const pile = this.crops.find((c) => c.kind === f.kind)
         if (!pile) continue
-        pile.max = f.max
         pile.regen = f.regen
+        this.syncFieldCapacity(pile)
         pile.count = Math.min(Math.max(0, f.count), pile.max)
         this.rebuildCropVisual(pile)
       }
