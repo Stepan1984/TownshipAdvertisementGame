@@ -973,6 +973,17 @@ export class Game {
     )
   }
 
+  /** Dump uses full sandbox footprint; other piles stay a small radius. */
+  private nearGroundStack(pos: THREE.Vector3, gs: GroundStack): boolean {
+    if (gs.mode === 'dump') {
+      return (
+        Math.abs(pos.x - gs.pos.x) <= DUMP_PAD_X * 0.5 &&
+        Math.abs(pos.z - gs.pos.z) <= DUMP_PAD_Z * 0.5
+      )
+    }
+    return pos.distanceTo(gs.pos) < 1.5
+  }
+
   private getField(): CropPile {
     return this.crops.find((c) => c.kind === 'crop') ?? this.crops[0]!
   }
@@ -1368,7 +1379,7 @@ export class Game {
     if (!driving && this.stack.length < this.maxStack) {
       for (const gs of this.groundStacks) {
         if (gs.kinds.length === 0) continue
-        if (this.player.position.distanceTo(gs.pos) < 1.5) {
+        if (this.nearGroundStack(this.player.position, gs)) {
           const kind = gs.kinds.pop()!
           this.pushStack(kind)
           this.rebuildGroundStack(gs)
@@ -2276,7 +2287,7 @@ export class Game {
       if (dump) {
         h.target.copy(dump.pos)
         this.moveToward(h.mesh, h.target, this.workerStep(4.2, dt))
-        if (h.mesh.position.distanceTo(dump.pos) < 1.3) {
+        if (this.nearGroundStack(h.mesh.position, dump)) {
           while (h.stack.length < 10 && dump.kinds.length > 0) {
             const kind = dump.kinds.pop()!
             const item = makeItem(kind)
