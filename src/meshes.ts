@@ -1026,6 +1026,9 @@ export function makeLabelSprite(text: string, color = '#ffffff'): THREE.Sprite {
   ctx.fill()
   ctx.fillStyle = color
   ctx.font = 'bold 42px Segoe UI, sans-serif'
+  // Shrink long texts (e.g. 6-digit Market prices) to fit the 224px plate instead of clipping
+  const w = ctx.measureText(text).width
+  if (w > 212) ctx.font = `bold ${Math.max(20, Math.floor((42 * 212) / w))}px Segoe UI, sans-serif`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(text, 128, 48)

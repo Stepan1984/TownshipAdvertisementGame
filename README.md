@@ -55,6 +55,7 @@ Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and go
 14. **Egg runner** — eggs → shop 1  
 15. **Jar loader** — jars → truck bays (one courier per jar bay; helps other bays when its truck is away)  
 16. **Worker speed** — couriers move faster  
+16b. **Shop expansion** — SELL: counter 96, twice faster checkout, bigger orders, more customers  
 17. **Truck bay B** — second jar station  
 18. **Field grow I/II** — purple FIELD regenerates faster  
 19. **Wheat field** — second crop  
@@ -65,6 +66,8 @@ Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and go
 23. **Collector 2** — auto-picks SELL-B cash  
 24. **Collector upgrade II** — scoop rate boost  
 25. **Cashier 2** — auto-sell SELL-B  
+25b. **Shop 2 expansion** — same upgrade for SELL-B  
+25c. **Market (repeatable)** — every level +10% to all income; price ×1.6 per level (a money sink for the late game)  
 26. **Truck bay C** — jars + wheat  
 
 ### West endgame
@@ -79,7 +82,17 @@ Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and go
 32. **Portals 1–3** — stack on the belt (scale + value tiers)  
 33. **NoRiseRing** — builds the street circuit north of the farm (pad by the north gate, after portal 3)  
 
+The top-left badge shows **UNLOCKS done/total**; under the goal bar a **Next:** line names the cheapest pad you can work towards, and a yellow arrow on the ground points to it.
+
 Goals in the top-left pay cash when completed. They follow the unlock order (sell → jars → eggs → trucks → bigger sales); while the building a goal needs isn't bought yet, a "Sell items" goal stands in.
+
+## Offline earnings
+
+Once the shop sells by itself (Cashier), coming back after at least a minute shows **Welcome back!** with what the farm earned: 25% of your recent income rate, for up to 2 hours away.
+
+## Sound
+
+Coin, unlock and goal sounds are synthesized in the browser (no audio files). The 🔊 / 🔇 button next to the difficulty toggles them; the choice is remembered.
 
 ## Save
 
