@@ -272,3 +272,108 @@ body {
     max-width: calc(100% - 32px);
   }
 }
+
+#next-pad {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fde68a;
+}
+
+#next-pad[hidden] {
+  display: none;
+}
+
+#mute-btn {
+  position: absolute;
+  top: 104px;
+  right: 16px;
+  pointer-events: auto;
+  cursor: pointer;
+  border: none;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  padding: 6px 9px;
+  border-radius: 10px;
+}
+
+#offline-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#offline-modal.hidden {
+  display: none;
+}
+
+#offline-card {
+  width: 100%;
+  max-width: 320px;
+  background: #1f3a24;
+  border-radius: 16px;
+  padding: 22px 20px;
+  color: #fff;
+  text-align: center;
+}
+
+#offline-card h2 {
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+
+#offline-text {
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+#offline-amount {
+  margin: 12px 0 16px;
+  font-size: 34px;
+  font-weight: 800;
+  color: #86efac;
+}
+
+#offline-collect {
+  width: 100%;
+  cursor: pointer;
+  border: none;
+  border-radius: 12px;
+  padding: 12px;
+  background: #22c55e;
+  color: #fff;
+  font: inherit;
+  font-weight: 800;
+  font-size: 17px;
+}
+
+#goal-badge {
+  max-width: calc(100% - 140px);
+}
+
+@media (max-width: 600px) {
+  #stage-badge {
+    font-size: 15px;
+    letter-spacing: 0;
+    padding: 6px 10px;
+  }
+
+  #money-badge {
+    font-size: 18px;
+    padding: 6px 12px;
+  }
+
+  #goal-badge {
+    top: 56px;
+  }
+}

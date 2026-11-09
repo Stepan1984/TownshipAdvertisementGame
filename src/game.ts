@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { Input } from './input'
+import { Sfx } from './sfx'
 import {
   DEFAULT_DIFFICULTY,
   DIFFICULTIES,
@@ -70,6 +71,12 @@ const TRAIN_CURVE_R = 13
 const NORISRING_HALF_Z = 48.5
 
 const MAX_STACK_BASE = 16
+/** Offline earnings: share of the recent income rate and the longest absence that counts. */
+const OFFLINE_RATE = 0.25
+const OFFLINE_CAP_SEC = 2 * 3600
+/** Market: repeatable upgrade, +10% income per level, price x1.6 per level. */
+const MARKET_BONUS = 0.1
+const MARKET_GROWTH = 1.6
 /** Stand within this distance of an unlock pad to pay into it. */
 const PAD_RADIUS = 1.3
 const PLAYER_SPEED = 6.2
@@ -84,6 +91,58 @@ const EGG_VALUE = 12
 const WHEAT_VALUE = 14
 const CUSTOMER_NEED = 3
 const SAVE_KEY = 'townshipAdGame_v1'
+
+/** Player-facing names for unlock pads (HUD "Next:" line). */
+const PAD_NAMES: Record<string, string> = {
+  plots: 'Bigger field',
+  tractor: 'Tractor',
+  tractorUp: 'Tractor trailer',
+  helper: 'Helper',
+  processor: 'Jar processor',
+  cashier: 'Cashier',
+  barn: 'Barn',
+  chickens: 'Chickens',
+  boots: 'Fast boots',
+  collector: 'Cash collector',
+  collectorUp: 'Collector speed',
+  truck: 'Truck bay A',
+  autoprocess: 'Factory bot',
+  mapExpand: 'Map expand',
+  eggRunner: 'Egg runner',
+  jarLoader: 'Jar loader',
+  workerSpeed: 'Worker speed',
+  shopUp: 'Shop expansion',
+  truckBay2: 'Truck bay B',
+  fieldUp: 'Field grow I',
+  fieldUp2: 'Field grow II',
+  field2: 'Wheat field',
+  wheatCombine: 'Wheat combine',
+  wheatUp: 'Wheat grow I',
+  wheatUp2: 'Wheat grow II',
+  shop2: 'Shop 2',
+  shop2Helper: 'Shop 2 helper',
+  collector2: 'Collector 2',
+  collectorUp2: 'Collector speed II',
+  cashier2: 'Cashier 2',
+  shop2Up: 'Shop 2 expansion',
+  truckBay3: 'Truck bay C',
+  westExpand: 'West expand',
+  factory: 'Factory',
+  conveyor: 'Conveyor',
+  train: 'Train',
+  trainCollector: 'Train collector',
+  collectorUp3: 'Collector speed III',
+  factoryUp: 'Factory upgrade',
+  conveyorUp: 'Conveyor upgrade',
+  trainUp: 'Train upgrade',
+  portal1: 'Portal 1',
+  portal2: 'Portal 2',
+  portal3: 'Portal 3',
+  norisring: 'NoRiseRing track',
+  raceCar: 'Race car',
+  superCar: 'Hypercar',
+  market: 'Market',
+}
 
 const UNLOCK_ORDER = [
   'plots',
@@ -103,6 +162,7 @@ const UNLOCK_ORDER = [
   'eggRunner',
   'jarLoader',
   'workerSpeed',
+  'shopUp',
   'truckBay2',
   'fieldUp',
   'fieldUp2',
@@ -115,6 +175,7 @@ const UNLOCK_ORDER = [
   'collector2',
   'collectorUp2',
   'cashier2',
+  'shop2Up',
   'truckBay3',
   'westExpand',
   'factory',
@@ -208,7 +269,12 @@ type MoneyStack = {
   mesh: THREE.Group
   amount: number
   pos: THREE.Vector3
+  /** Earned since the last floating "+$" popup here (sales are batched into one popup). */
+  floatPending?: number
+  floatT?: number
 }
+
+type FloatText = { sprite: THREE.Sprite; life: number }
 
 type Customer = {
   mesh: THREE.Group
@@ -233,6 +299,9 @@ type UnlockPad = {
   lastShown: number
   prefix: string
   requires?: string
+  /** Market-style pad: buying it raises its level instead of removing it. */
+  repeatable?: boolean
+  level?: number
   /** False while the player was already standing on it when it appeared — must step off first. */
   armed: boolean
   /** Seconds until the price label may be redrawn again (avoid a new texture every frame). */
@@ -328,6 +397,10 @@ type SaveData = {
   collectorMoveMul?: number
   collectorGrabMul?: number
   difficulty?: Difficulty
+  /** Wall-clock ms of the save + smoothed income ($/s) — for offline earnings. */
+  savedAt?: number
+  incomeRate?: number
+  marketLevel?: number
 }
 
 export class Game {
@@ -335,6 +408,16 @@ export class Game {
   camera: THREE.PerspectiveCamera
   renderer: THREE.WebGLRenderer
   input = new Input()
+  sfx = new Sfx()
+  private floats: FloatText[] = []
+  /** Smoothed income in $/s (sales, trucks, trains) — drives offline earnings. */
+  private incomeRate = 0
+  private earnWindow = 0
+  private earnT = 0
+  private offlinePending = 0
+  private offlineAway = 0
+  /** Levels bought on the repeatable Market pad. */
+  marketLevel = 0
   clock = new THREE.Clock()
 
   player: THREE.Group
@@ -401,6 +484,9 @@ export class Game {
 
   // Shop 2 (east)
   shop2Ready = false
+  /** Shop expansion bought (bigger counter, faster checkout, more customers). */
+  shopExpanded = false
+  shop2Expanded = false
   autoCashier2 = false
   counterStock2: ItemKind[] = []
   counterStockMesh2: THREE.Group | null = null
@@ -438,6 +524,10 @@ export class Game {
 
   private hintEl = document.getElementById('hint')!
   private stageEl = document.getElementById('stage-num')!
+  private nextPadEl = document.getElementById('next-pad')
+  /** Ground arrow next to the player pointing at the next pad to buy. */
+  private nextArrow: THREE.Mesh | null = null
+  private nextPadKey = ''
   private moneyEl = document.getElementById('money-num')!
   private goalEl = document.getElementById('goal-text')!
   private goalFill = document.getElementById('goal-fill')!
@@ -502,10 +592,14 @@ export class Game {
     this.counterStockMesh.position.set(0, 1.0, 8.85)
     this.scene.add(this.counterStockMesh)
 
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       // Queue from counter toward the entrance gate (+Z)
       this.queuePoints.push(new THREE.Vector3(0, 0, 9.9 + i * 1.05))
     }
+    // Spawn / leave behind the last queue slot so nobody pops in mid-line
+    const tail1 = this.queuePoints[this.queuePoints.length - 1]!.z
+    this.customerSpawn.z = tail1 + 1.2
+    this.customerExit.z = tail1 + 2.2
 
     this.onResize()
     window.addEventListener('resize', () => this.onResize())
@@ -515,6 +609,7 @@ export class Game {
       if (document.hidden) this.saveProgress()
     })
     this.loadProgress()
+    this.refreshProgressBadge()
     // Rebuild track with latest mesh code (unlock path may have used a cached early return before)
     if (this.unlocked.has('norisring')) this.buildNorisring()
   }
@@ -1173,6 +1268,10 @@ export class Game {
       this.createUnlockPad('workerSpeed', 1900, new THREE.Vector3(3.5, 0, 0.5), '⚡', 'jarLoader'),
     )
     this.unlockPads.push(
+      // Shop expansion — west of the gate, clear of the DUMP (x <= -3.3) and the queue (x = 0)
+      this.createUnlockPad('shopUp', 2200, new THREE.Vector3(-1.9, 0, 10.0), '🏪', 'workerSpeed'),
+    )
+    this.unlockPads.push(
       this.createUnlockPad('truckBay2', 2000, new THREE.Vector3(14.5, 0, 1.2), '🚚', 'workerSpeed'),
     )
     this.unlockPads.push(
@@ -1209,6 +1308,14 @@ export class Game {
     // Avoid pad overlap with collector2 at (15.5, 5.5)
     this.unlockPads.push(
       this.createUnlockPad('cashier2', 3100, new THREE.Vector3(12.0, 0, 5.9), '🧾', 'collector2'),
+    )
+    this.unlockPads.push(
+      // Market — repeatable money sink east of the gate (box x 1.5..3.3 / z 9.1..10.9, clear of the money pad and fence)
+      this.createRepeatablePad('market', 5000, new THREE.Vector3(2.4, 0, 10.0), 'truckBay3'),
+    )
+    this.unlockPads.push(
+      // Shop 2 expansion — west of counter 2 / SELL-B, clear of the NoRiseRing dirt run (x <= 8.05)
+      this.createUnlockPad('shop2Up', 3500, new THREE.Vector3(9.3, 0, 8.6), '🏪', 'cashier2'),
     )
     this.unlockPads.push(
       this.createUnlockPad('truckBay3', 3400, new THREE.Vector3(14.5, 0, -1.5), '🚛', 'cashier2'),
@@ -1308,7 +1415,13 @@ export class Game {
   }
 
   private scaledIncome(amount: number) {
-    return Math.max(1, Math.round(amount * this.preset.incomeMul))
+    return Math.max(1, Math.round(amount * this.preset.incomeMul * (1 + MARKET_BONUS * this.marketLevel)))
+  }
+
+  /** Current price of a pad: difficulty multiplier, plus level growth for the repeatable Market. */
+  private padPrice(pad: UnlockPad) {
+    const growth = pad.repeatable ? Math.pow(MARKET_GROWTH, pad.level ?? 0) : 1
+    return this.scaledCost(pad.baseCost * growth)
   }
 
   private scaledGoal(goal: Goal): Goal {
@@ -1333,7 +1446,7 @@ export class Game {
     )
     for (const pad of this.unlockPads) {
       if (pad.done) continue
-      pad.cost = this.scaledCost(pad.baseCost)
+      pad.cost = this.padPrice(pad)
       if (pad.paid > pad.cost) {
         this.money += pad.paid - pad.cost
         pad.paid = pad.cost
@@ -1347,11 +1460,26 @@ export class Game {
   }
 
   private completePad(pad: UnlockPad) {
+    if (pad.repeatable) {
+      pad.level = (pad.level ?? 0) + 1
+      this.marketLevel = pad.level
+      pad.paid = 0
+      pad.cost = this.padPrice(pad)
+      pad.prefix = `📈 Lv${pad.level + 1}`
+      pad.lastShown = pad.cost
+      pad.armed = false // step off and back on to buy the next level
+      this.refreshUnlockLabel(pad)
+      this.sfx.unlock()
+      this.setHint(`Market Lv ${pad.level}: all income +${Math.round(MARKET_BONUS * 100 * pad.level)}%`)
+      this.saveProgress()
+      return
+    }
     pad.done = true
     pad.active = false
     this.scene.remove(pad.mesh)
     const label = pad.mesh.getObjectByName('label') as THREE.Sprite | undefined
     if (label) disposeLabel(label)
+    this.sfx.unlock()
     this.onUnlock(pad.id)
   }
 
@@ -1370,6 +1498,36 @@ export class Game {
     })
     const close = modal.querySelector<HTMLButtonElement>('[data-close]')
     if (close) close.hidden = !canClose
+  }
+
+  private showOfflineEarnings() {
+    const amount = this.offlinePending
+    const modal = document.getElementById('offline-modal')
+    if (amount < 1 || !modal) return
+    this.updateHud(0) // the game is paused under the modal — show the restored money/goal, not the HTML defaults
+    const h = Math.floor(this.offlineAway / 3600)
+    const m = Math.floor((this.offlineAway % 3600) / 60)
+    const text = document.getElementById('offline-text')
+    if (text) text.textContent = `While you were away (${h > 0 ? `${h}h ` : ''}${m}m) your farm earned`
+    const amt = document.getElementById('offline-amount')
+    if (amt) amt.textContent = `$${amount}`
+    this.paused = true
+    modal.classList.remove('hidden')
+    const btn = document.getElementById('offline-collect')
+    btn?.addEventListener(
+      'click',
+      () => {
+        this.money += this.offlinePending
+        this.offlinePending = 0
+        modal.classList.add('hidden')
+        this.paused = false
+        this.clock.getDelta()
+        this.pulseMoney()
+        this.sfx.coin()
+        this.saveProgress()
+      },
+      { once: true },
+    )
   }
 
   private closeDifficultyPicker() {
@@ -1395,8 +1553,28 @@ export class Game {
     modal.querySelector('[data-close]')?.addEventListener('click', () => this.closeDifficultyPicker())
     document
       .getElementById('difficulty-btn')
-      ?.addEventListener('click', () => this.openDifficultyPicker(true))
+      ?.addEventListener('click', (e) => {
+        ;(e.currentTarget as HTMLElement).blur()
+        this.openDifficultyPicker(true)
+      })
+    const mute = document.getElementById('mute-btn')
+    const syncMute = () => {
+      if (mute) mute.textContent = this.sfx.muted ? '🔇' : '🔊'
+    }
+    mute?.addEventListener('click', () => {
+      this.sfx.setMuted(!this.sfx.muted)
+      syncMute()
+      mute.blur()
+    })
+    syncMute()
     this.updateDifficultyButton()
+  }
+
+  private createRepeatablePad(id: string, cost: number, pos: THREE.Vector3, requires: string): UnlockPad {
+    const pad = this.createUnlockPad(id, cost, pos, '📈 Lv1', requires)
+    pad.repeatable = true
+    pad.level = 0
+    return pad
   }
 
   private refreshPadVisibility() {
@@ -1438,6 +1616,7 @@ export class Game {
   start() {
     this.bindDifficultyUi()
     if (this.isNewGame) this.openDifficultyPicker(false)
+    else this.showOfflineEarnings()
     const loop = () => {
       const dt = Math.min(this.clock.getDelta(), 0.05)
       if (!this.paused) this.update(dt)
@@ -1472,11 +1651,11 @@ export class Game {
     this.updateCamera(dt)
     this.updateHud(dt)
 
-    const maxCust = Math.min(6, 3 + Math.floor(this.stage / 2))
+    const maxCust = Math.min(6, 3 + Math.floor(this.stage / 2)) + (this.shopExpanded ? 2 : 0)
     this.spawnTimer -= dt
     if (this.spawnTimer <= 0 && this.customers.length < maxCust) {
       this.spawnCustomer()
-      this.spawnTimer = Math.max(1.4, 2.6 - this.stage * 0.12)
+      this.spawnTimer = Math.max(this.shopExpanded ? 0.9 : 1.4, 2.6 - this.stage * 0.12)
     }
   }
 
@@ -1717,7 +1896,7 @@ export class Game {
 
   private depositToCounter() {
     let changed = false
-    while (this.stack.length > 0 && this.counterStock.length < 48) {
+    while (this.stack.length > 0 && this.counterStock.length < this.counterCap(1)) {
       const kind = this.popStack()
       if (!kind) break
       this.counterStock.push(kind)
@@ -1729,7 +1908,7 @@ export class Game {
   private depositToCounter2() {
     if (!this.counterStockMesh2) return
     let changed = false
-    while (this.stack.length > 0 && this.counterStock2.length < 48) {
+    while (this.stack.length > 0 && this.counterStock2.length < this.counterCap(2)) {
       const kind = this.popStack()
       if (!kind) break
       this.counterStock2.push(kind)
@@ -1889,7 +2068,7 @@ export class Game {
     this.customers.push({
       mesh,
       state: 'queue',
-      need: CUSTOMER_NEED + Math.min(2, Math.floor(this.stage / 2)),
+      need: CUSTOMER_NEED + Math.min(2, Math.floor(this.stage / 2)) + this.extraNeed(1),
       held: 0,
       slot: this.customers.length,
       timer: 0,
@@ -1922,7 +2101,7 @@ export class Game {
         if (!canTrade) continue
 
         c.timer += dt
-        if (c.timer >= 0.26 && this.counterStock.length > 0 && c.held < c.need) {
+        if (c.timer >= this.sellTick(1) && this.counterStock.length > 0 && c.held < c.need) {
           c.timer = 0
           const kind = this.counterStock.shift()!
           this.rebuildCounterStock()
@@ -1960,6 +2139,21 @@ export class Game {
     obj.rotation.y = Math.atan2(dx, dz)
   }
 
+  /** Items a shop counter can hold. */
+  private counterCap(shop: 1 | 2) {
+    return (shop === 1 ? this.shopExpanded : this.shop2Expanded) ? 96 : 48
+  }
+
+  /** Seconds per item handed to a buying customer. */
+  private sellTick(shop: 1 | 2) {
+    return (shop === 1 ? this.shopExpanded : this.shop2Expanded) ? 0.13 : 0.26
+  }
+
+  /** Extra items each customer buys after the expansion (fewer walk-in gaps). */
+  private extraNeed(shop: 1 | 2) {
+    return (shop === 1 ? this.shopExpanded : this.shop2Expanded) ? 3 : 0
+  }
+
   /** Two-column carry stack so big loads (16 jars / crops) don't tower over the map. */
   private placeCarried(item: THREE.Object3D, i: number) {
     item.position.set(((i % 2) - 0.5) * 0.36, Math.floor(i / 2) * 0.32, 0)
@@ -1991,6 +2185,8 @@ export class Game {
     const reward = this.goal.reward
     this.money += reward
     this.pulseMoney()
+    this.sfx.goal()
+    this.spawnFloat(`+$${reward}`, this.player.position, '#fde047')
     // Filler goals keep the scripted chain where it is
     if (this.goal.id !== 'filler') this.goalsDone++
     this.nextGoal()
@@ -2046,6 +2242,8 @@ export class Game {
       this.moneyStacks.push(stack)
     }
     stack.amount += amount
+    stack.floatPending = (stack.floatPending ?? 0) + amount
+    this.earnWindow += amount
     this.syncMoneyVisual(stack)
   }
 
@@ -2064,7 +2262,46 @@ export class Game {
     }
   }
 
-  private updateMoneyPickup(_dt: number) {
+  /** Rising "+$N" text that fades out (its canvas texture is freed afterwards). */
+  private spawnFloat(text: string, at: THREE.Vector3, color = '#86efac') {
+    const sprite = makeLabelSprite(text, color)
+    sprite.position.set(at.x, 1.6, at.z)
+    sprite.scale.multiplyScalar(0.8)
+    sprite.renderOrder = 10
+    this.scene.add(sprite)
+    this.floats.push({ sprite, life: 1 })
+    if (this.floats.length > 24) this.removeFloat(this.floats.shift()!)
+  }
+
+  private removeFloat(f: FloatText) {
+    this.scene.remove(f.sprite)
+    disposeLabel(f.sprite)
+  }
+
+  private updateFloats(dt: number) {
+    // Batch payouts per cash pile: at most one popup every 0.45 s per spot
+    for (const stack of this.moneyStacks) {
+      stack.floatT = (stack.floatT ?? 0) - dt
+      if ((stack.floatPending ?? 0) >= 1 && stack.floatT <= 0) {
+        this.spawnFloat(`+$${Math.floor(stack.floatPending!)}`, stack.pos)
+        stack.floatPending = 0
+        stack.floatT = 0.45
+      }
+    }
+    for (const f of this.floats) {
+      f.life -= dt
+      f.sprite.position.y += dt * 1.4
+      f.sprite.material.opacity = Math.max(0, Math.min(1, f.life * 1.5))
+    }
+    const dead = this.floats.filter((f) => f.life <= 0)
+    if (dead.length) {
+      for (const f of dead) this.removeFloat(f)
+      this.floats = this.floats.filter((f) => f.life > 0)
+    }
+  }
+
+  private updateMoneyPickup(dt: number) {
+    this.updateFloats(dt)
     for (const stack of this.moneyStacks) {
       if (stack.amount <= 0) continue
       // Auto-collectors handle their own piles — player picks up the rest
@@ -2077,6 +2314,7 @@ export class Game {
       this.money += take
       this.syncMoneyVisual(stack)
       this.pulseMoney()
+      this.sfx.coin()
     }
   }
 
@@ -2275,6 +2513,16 @@ export class Game {
       if (!silent) this.setHint('Couriers move faster! Unlock a second truck bay!')
     }
 
+    if (id === 'shopUp') {
+      this.shopExpanded = true
+      if (!silent) this.setHint('Shop expanded: bigger counter, faster checkout, more customers!')
+    }
+
+    if (id === 'shop2Up') {
+      this.shop2Expanded = true
+      if (!silent) this.setHint('Shop 2 expanded: bigger counter, faster checkout, more customers!')
+    }
+
     if (id === 'truckBay2') {
       this.activateTruckStation('B')
       this.syncJarLoaders()
@@ -2461,7 +2709,7 @@ export class Game {
       if (!silent) this.setHint('Hypercar unlocked — much faster! Space / E or DRIVE')
     }
 
-    this.stageEl.textContent = String(this.stage)
+    this.refreshProgressBadge()
     if (!this.loadingSave) this.saveProgress()
   }
 
@@ -2731,7 +2979,7 @@ export class Game {
       }
     } else if (h.state === 'deposit') {
       h.timer += dt
-      if (h.timer >= 0.12 && h.stack.length > 0 && this.counterStock.length < 48) {
+      if (h.timer >= 0.12 && h.stack.length > 0 && this.counterStock.length < this.counterCap(1)) {
         h.timer = 0
         const kind = h.stack.pop()!
         const child = h.stackRoot.children[h.stackRoot.children.length - 1]
@@ -3418,7 +3666,7 @@ export class Game {
       }
     } else if (w.state === 'deposit') {
       w.timer += dt
-      if (w.timer >= 0.12 && w.stack.length > 0 && this.counterStock.length < 48) {
+      if (w.timer >= 0.12 && w.stack.length > 0 && this.counterStock.length < this.counterCap(1)) {
         w.timer = 0
         w.stack.pop()
         const child = w.stackRoot.children[w.stackRoot.children.length - 1]
@@ -3643,7 +3891,7 @@ export class Game {
       }
     } else if (w.state === 'deposit') {
       w.timer += dt
-      if (w.timer >= 0.12 && w.stack.length > 0 && this.counterStock2.length < 48) {
+      if (w.timer >= 0.12 && w.stack.length > 0 && this.counterStock2.length < this.counterCap(2)) {
         w.timer = 0
         w.stack.pop()
         const child = w.stackRoot.children[w.stackRoot.children.length - 1]
@@ -3757,9 +4005,12 @@ export class Game {
     this.scene.add(this.counterStockMesh2)
 
     this.queuePoints2 = []
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 7; i++) {
       this.queuePoints2.push(new THREE.Vector3(12, 0, 9.9 + i * 1.05))
     }
+    const tail2 = this.queuePoints2[this.queuePoints2.length - 1]!.z
+    this.customerSpawn2.z = tail2 + 1.2
+    this.customerExit2.z = tail2 + 2.2
   }
 
   private updateShop2(dt: number) {
@@ -3780,11 +4031,11 @@ export class Game {
       }
     }
 
-    const maxCust = Math.min(5, 2 + Math.floor(this.stage / 3))
+    const maxCust = Math.min(5, 2 + Math.floor(this.stage / 3)) + (this.shop2Expanded ? 2 : 0)
     this.spawnTimer2 -= dt
     if (this.spawnTimer2 <= 0 && this.customers2.length < maxCust) {
       this.spawnCustomer2()
-      this.spawnTimer2 = 2.0
+      this.spawnTimer2 = this.shop2Expanded ? 1.2 : 2.0
     }
 
     const queued = this.customers2.filter((c) => c.state === 'queue' || c.state === 'buying')
@@ -3805,7 +4056,7 @@ export class Game {
           this.autoCashier2 || this.player.position.distanceTo(this.sellZone2) < 1.5
         if (!canTrade) continue
         c.timer += dt
-        if (c.timer >= 0.26 && this.counterStock2.length > 0 && c.held < c.need) {
+        if (c.timer >= this.sellTick(2) && this.counterStock2.length > 0 && c.held < c.need) {
           c.timer = 0
           // Prefer wheat from shop2 stock
           let idx = this.counterStock2.findIndex((k) => k === 'wheat')
@@ -3845,7 +4096,7 @@ export class Game {
     this.customers2.push({
       mesh,
       state: 'queue',
-      need: CUSTOMER_NEED + Math.min(2, Math.floor(this.stage / 3)),
+      need: CUSTOMER_NEED + Math.min(2, Math.floor(this.stage / 3)) + this.extraNeed(2),
       held: 0,
       slot: this.customers2.length,
       timer: 0,
@@ -3946,7 +4197,84 @@ export class Game {
     this.camera.lookAt(this.player.position.x, 0.5, this.player.position.z)
   }
 
+  /** "UNLOCKS 12/47" — the old STAGE number skipped and repeated values. */
+  private refreshProgressBadge() {
+    const pads = this.unlockPads.filter((p) => !p.repeatable)
+    this.stageEl.textContent = `${pads.filter((p) => p.done).length}/${pads.length}`
+  }
+
+  /** Cheapest pad still to buy (one-shot pads first; the repeatable Market only when nothing else is left). */
+  private nextPad(): UnlockPad | null {
+    let best: UnlockPad | null = null
+    for (const pad of this.unlockPads) {
+      if (!pad.active || pad.done) continue
+      if (!best) {
+        best = pad
+        continue
+      }
+      if (!!pad.repeatable !== !!best.repeatable) {
+        if (!pad.repeatable) best = pad
+        continue
+      }
+      if (pad.cost - pad.paid < best.cost - best.paid) best = pad
+    }
+    return best
+  }
+
+  private updateNextPadPointer() {
+    const pad = this.drivenCar ? null : this.nextPad()
+    // HUD line
+    const key = pad ? `${pad.id}:${Math.ceil(pad.cost - pad.paid)}` : ''
+    if (key !== this.nextPadKey && this.nextPadEl) {
+      this.nextPadKey = key
+      const name = pad ? (PAD_NAMES[pad.id] ?? pad.id) + (pad.repeatable ? ` Lv ${(pad.level ?? 0) + 1}` : '') : ''
+      this.nextPadEl.textContent = pad ? `Next: ${name} — $${Math.ceil(pad.cost - pad.paid)}` : ''
+      this.nextPadEl.hidden = !pad
+    }
+    // Ground arrow (hidden once the pad is close enough to see)
+    if (!this.nextArrow) {
+      const shape = new THREE.Shape()
+      shape.moveTo(0, 0.55)
+      shape.lineTo(0.38, 0)
+      shape.lineTo(0.14, 0)
+      shape.lineTo(0.14, -0.4)
+      shape.lineTo(-0.14, -0.4)
+      shape.lineTo(-0.14, 0)
+      shape.lineTo(-0.38, 0)
+      shape.closePath()
+      const geo = new THREE.ShapeGeometry(shape)
+      geo.rotateX(-Math.PI / 2) // lay flat; tip points to -Z
+      const mat = new THREE.MeshBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.9, depthWrite: false })
+      this.nextArrow = new THREE.Mesh(geo, mat)
+      this.nextArrow.renderOrder = 5
+      this.scene.add(this.nextArrow)
+    }
+    const arrow = this.nextArrow
+    if (!pad) {
+      arrow.visible = false
+      return
+    }
+    const dx = pad.mesh.position.x - this.player.position.x
+    const dz = pad.mesh.position.z - this.player.position.z
+    const dist = Math.hypot(dx, dz)
+    arrow.visible = dist > 3
+    if (!arrow.visible) return
+    const nx = dx / dist
+    const nz = dz / dist
+    const bob = 1.5 + Math.sin(this.clock.elapsedTime * 5) * 0.12
+    arrow.position.set(this.player.position.x + nx * bob, 0.06, this.player.position.z + nz * bob)
+    arrow.rotation.y = Math.atan2(-nx, -nz)
+  }
+
   private updateHud(dt: number) {
+    this.updateNextPadPointer()
+    this.earnT += dt
+    if (this.earnT >= 15) {
+      const sample = this.earnWindow / this.earnT
+      this.incomeRate = this.incomeRate > 0 ? this.incomeRate * 0.6 + sample * 0.4 : sample
+      this.earnWindow = 0
+      this.earnT = 0
+    }
     this.moneyEl.textContent = String(Math.floor(this.money))
     this.hintTimer -= dt
     if (this.hintTimer <= 0) this.hintEl.classList.add('hidden')
@@ -3981,7 +4309,7 @@ export class Game {
       v: 2,
       // Cash lying on the ground and jars already loaded into trucks aren't restored as objects,
       // so bank their value instead of losing it on reload
-      money: Math.floor(this.money + this.unbankedValue()),
+      money: Math.floor(this.money + this.unbankedValue() + this.offlinePending),
       stage: this.stage,
       maxStack: this.maxStack,
       playerSpeedMul: this.playerSpeedMul,
@@ -4006,6 +4334,9 @@ export class Game {
       collectorMoveMul: this.collectorMoveMul,
       collectorGrabMul: this.collectorGrabMul,
       difficulty: this.difficulty,
+      savedAt: Date.now(),
+      incomeRate: Math.round(this.incomeRate * 100) / 100,
+      marketLevel: this.marketLevel,
     }
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(data))
@@ -4031,8 +4362,13 @@ export class Game {
       // Saves from before difficulty existed keep the original (normal) balance
       this.isNewGame = false
       this.difficulty = isDifficulty(data.difficulty) ? data.difficulty : DEFAULT_DIFFICULTY
+      this.marketLevel = Math.max(0, Math.floor(data.marketLevel ?? 0))
       for (const pad of this.unlockPads) {
-        pad.cost = this.scaledCost(pad.baseCost)
+        if (pad.repeatable) {
+          pad.level = this.marketLevel
+          pad.prefix = `📈 Lv${this.marketLevel + 1}`
+        }
+        pad.cost = this.padPrice(pad)
         pad.lastShown = pad.cost
         this.refreshUnlockLabel(pad)
       }
@@ -4058,6 +4394,15 @@ export class Game {
       }
 
       this.money = Math.max(0, data.money ?? 0)
+      this.incomeRate = Math.max(0, data.incomeRate ?? 0)
+      // Offline earnings: only once the shop sells by itself, 25% of the recent rate, capped at 2 h
+      if (typeof data.savedAt === 'number' && this.unlocked.has('cashier') && this.incomeRate > 0) {
+        const away = Math.min((Date.now() - data.savedAt) / 1000, OFFLINE_CAP_SEC)
+        if (away >= 60) {
+          this.offlinePending = Math.floor(away * this.incomeRate * OFFLINE_RATE)
+          this.offlineAway = away
+        }
+      }
       this.stage = data.stage ?? this.stage
       this.maxStack = data.maxStack ?? this.maxStack
       this.playerSpeedMul = data.playerSpeedMul ?? this.playerSpeedMul
@@ -4113,7 +4458,7 @@ export class Game {
         this.rebuildCropVisual(pile)
       }
 
-      this.stageEl.textContent = String(this.stage)
+      this.refreshProgressBadge()
       this.refreshPadVisibility()
       if (data.unlocked.length > 0 || this.money > 0) {
         this.setHint('Welcome back! Progress restored')
