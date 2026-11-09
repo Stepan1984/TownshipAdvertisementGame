@@ -1,6 +1,13 @@
 import * as THREE from 'three'
 import { Input } from './input'
 import {
+  DEFAULT_DIFFICULTY,
+  DIFFICULTIES,
+  JAR_LOADER_CAPACITY,
+  isDifficulty,
+  type Difficulty,
+} from './balance'
+import {
   COLORS,
   makeBarn,
   makeBill,
@@ -9,7 +16,6 @@ import {
   makeConveyorSegment,
   makeCoop,
   makeCounter,
-  makeCropItem,
   makeDumpSandbox,
   makeFactory,
   makeFence,
@@ -95,6 +101,7 @@ const UNLOCK_ORDER = [
   'fieldUp',
   'fieldUp2',
   'field2',
+  'wheatCombine',
   'wheatUp',
   'wheatUp2',
   'shop2',
@@ -163,17 +170,33 @@ type GroundStack = {
   pos: THREE.Vector3
   /** Dump sandbox uses a wide grid; other piles stay compact. */
   mode?: 'dump' | 'pile'
+  /** Sandbox footprint / fill grid; defaults to the purple DUMP_* constants. */
+  spec?: DumpSpec
 }
+
+type DumpSpec = { padX: number; padZ: number; cols: number; rows: number; layers: number }
 
 /** Dump sandbox fill: 12 rows × N cols × 4 high per cell. */
 const DUMP_COLS = 8
 const DUMP_ROWS = 12
 const DUMP_LAYERS = 4
-const DUMP_CAPACITY = DUMP_COLS * DUMP_ROWS * DUMP_LAYERS
 const DUMP_PAD_X = 5.4
 const DUMP_PAD_Z = 5.0
 const TRACTOR_CARGO_BASE = 14
 const TRACTOR_CARGO_UP = 44
+/** Jar pile at the processor output (shared by player + factory bot). */
+const PROCESS_OUT_CAP = 60
+const PROCESSOR_BOT_CARRY = 16
+/** Drive speed of harvesters (scaled by workerSpeedMul). */
+const TRACTOR_SPEED = 6
+/** Harvest at least this fast, and ~4 items per field regrow tick when the field grows faster. */
+const TRACTOR_HARVEST_INTERVAL = 0.13
+/** Cargo items drawn on the tractor (bed 8 + 3 trailer layers) — the rest is carried invisibly. */
+const TRACTOR_BED_VISUAL = 8
+const TRACTOR_TRAILER_VISUAL = 27
+const WHEAT_COMBINE_SPEED = 5
+const WHEAT_COMBINE_CARGO = 16
+const WHEAT_DUMP_SPEC: DumpSpec = { padX: 1.9, padZ: 1.8, cols: 4, rows: 4, layers: 6 }
 
 type MoneyStack = {
   mesh: THREE.Group
@@ -194,6 +217,8 @@ type Customer = {
 
 type UnlockPad = {
   mesh: THREE.Group
+  /** Price before the difficulty multiplier. */
+  baseCost: number
   cost: number
   paid: number
   id: string
@@ -206,10 +231,22 @@ type UnlockPad = {
 
 type TractorAI = {
   mesh: THREE.Group
+  /** Which field it harvests: purple FIELD ('crop') or WHEAT. */
+  kind: 'crop' | 'wheat'
   cargo: ItemKind[]
+  /** Current trip capacity (recomputed from field regrow speed on every trip). */
   capacity: number
+  /** Minimum capacity and "seconds of regrowth" carried per trip. */
+  baseCapacity: number
+  capacityPerRegen: number
+  hasTrailer: boolean
+  /** Drive speed before workerSpeedMul. */
+  baseSpeed: number
+  dumpPos: THREE.Vector3
+  dumpSpec?: DumpSpec
+  harvestPoint: THREE.Vector3
+  /** 'dump' also covers waiting at a full dump until there is room. */
   state: 'seek' | 'harvest' | 'dump'
-  targetPile: CropPile | null
   timer: number
 }
 
@@ -221,6 +258,9 @@ type HelperAI = {
   target: THREE.Vector3
   timer: number
 }
+
+/** Jar courier assigned to one truck bay (helps other bays when its own truck is away). */
+type JarLoaderAI = HelperAI & { bay: string }
 
 type TruckOrder = {
   mesh: THREE.Group
@@ -275,6 +315,7 @@ type SaveData = {
   portalsActive?: boolean[]
   collectorMoveMul?: number
   collectorGrabMul?: number
+  difficulty?: Difficulty
 }
 
 export class Game {
@@ -300,6 +341,11 @@ export class Game {
   autoMoneyTrain = false
   autoProcess = false
   unlocked = new Set<string>()
+  difficulty: Difficulty = DEFAULT_DIFFICULTY
+  /** True while the difficulty picker is open — simulation is frozen. */
+  private paused = false
+  /** No valid save found → ask for difficulty on start. */
+  private isNewGame = true
 
   crops: CropPile[] = []
   groundStacks: GroundStack[] = []
@@ -316,13 +362,16 @@ export class Game {
   queuePoints: THREE.Vector3[] = []
 
   tractor: TractorAI | null = null
+  wheatCombine: TractorAI | null = null
+  /** Wheat DUMP — just north of the wheat field's fixed north edge (z -5.5). */
+  wheatDumpPos = new THREE.Vector3(12.2, 0, -4.0)
   helper: HelperAI | null = null
   collector: HelperAI | null = null
   collector2: HelperAI | null = null
   collectorTrain: HelperAI | null = null
   processorBot: HelperAI | null = null
   eggRunner: HelperAI | null = null
-  jarLoader: HelperAI | null = null
+  jarLoaders: JarLoaderAI[] = []
   shop2Helper: HelperAI | null = null
   truckStations: TruckStation[] = []
   chickens: THREE.Group[] = []
@@ -976,10 +1025,8 @@ export class Game {
   /** Dump uses full sandbox footprint; other piles stay a small radius. */
   private nearGroundStack(pos: THREE.Vector3, gs: GroundStack): boolean {
     if (gs.mode === 'dump') {
-      return (
-        Math.abs(pos.x - gs.pos.x) <= DUMP_PAD_X * 0.5 &&
-        Math.abs(pos.z - gs.pos.z) <= DUMP_PAD_Z * 0.5
-      )
+      const { padX, padZ } = this.dumpSpec(gs)
+      return Math.abs(pos.x - gs.pos.x) <= padX * 0.5 && Math.abs(pos.z - gs.pos.z) <= padZ * 0.5
     }
     return pos.distanceTo(gs.pos) < 1.5
   }
@@ -1120,6 +1167,10 @@ export class Game {
       this.createUnlockPad('field2', 2400, new THREE.Vector3(15.8, 0, 5.0), '🌾', 'truckBay2'),
     )
     this.unlockPads.push(
+      // Pad sits just north of the WHEAT DUMP sandbox (12.2, -4.0); clear of LOAD-C / truckBay3 / wheatUp
+      this.createUnlockPad('wheatCombine', 2500, new THREE.Vector3(12.2, 0, -1.9), '🚜', 'field2'),
+    )
+    this.unlockPads.push(
       this.createUnlockPad('wheatUp', 2700, new THREE.Vector3(10.2, 0, -4.2), '🌾', 'field2'),
     )
     this.unlockPads.push(
@@ -1200,6 +1251,8 @@ export class Game {
     prefix: string,
     requires?: string,
   ): UnlockPad {
+    const baseCost = cost
+    cost = this.scaledCost(baseCost)
     const mesh = new THREE.Group()
     mesh.position.copy(pos)
     const pad = makeZonePlane(1.8, 1.8, 0xffffff, 0.45)
@@ -1213,6 +1266,7 @@ export class Game {
     mesh.visible = !requires
     return {
       mesh,
+      baseCost,
       cost,
       paid: 0,
       id,
@@ -1222,6 +1276,104 @@ export class Game {
       prefix,
       requires,
     }
+  }
+
+  private get preset() {
+    return DIFFICULTIES[this.difficulty]
+  }
+
+  private scaledCost(baseCost: number) {
+    return Math.max(1, Math.round((baseCost * this.preset.costMul) / 10) * 10)
+  }
+
+  private scaledIncome(amount: number) {
+    return Math.max(1, Math.round(amount * this.preset.incomeMul))
+  }
+
+  private scaledGoal(goal: Goal): Goal {
+    return {
+      ...goal,
+      target: Math.max(1, Math.round(goal.target * this.preset.goalMul)),
+      reward: this.scaledIncome(goal.reward),
+    }
+  }
+
+  /** Switch difficulty: re-price every pending pad (refunding overpayment). */
+  setDifficulty(d: Difficulty) {
+    const prev = this.preset
+    this.difficulty = d
+    const next = this.preset
+    this.goal.target = Math.max(1, Math.round((this.goal.target / prev.goalMul) * next.goalMul))
+    this.goal.reward = Math.max(1, Math.round((this.goal.reward / prev.incomeMul) * next.incomeMul))
+    // Keep the progress fraction, but never jump to "done" just by switching difficulty
+    this.goal.current = Math.max(
+      0,
+      Math.min(this.goal.target - 1, Math.round((this.goal.current / prev.goalMul) * next.goalMul)),
+    )
+    for (const pad of this.unlockPads) {
+      if (pad.done) continue
+      pad.cost = this.scaledCost(pad.baseCost)
+      if (pad.paid > pad.cost) {
+        this.money += pad.paid - pad.cost
+        pad.paid = pad.cost
+      }
+      pad.lastShown = Math.max(0, Math.ceil(pad.cost - pad.paid))
+      this.refreshUnlockLabel(pad)
+      if (pad.paid >= pad.cost && pad.active) this.completePad(pad)
+    }
+    this.updateDifficultyButton()
+    this.saveProgress()
+  }
+
+  private completePad(pad: UnlockPad) {
+    pad.done = true
+    pad.active = false
+    this.scene.remove(pad.mesh)
+    this.onUnlock(pad.id)
+  }
+
+  private updateDifficultyButton() {
+    const btn = document.getElementById('difficulty-btn')
+    if (btn) btn.textContent = this.preset.label
+  }
+
+  private openDifficultyPicker(canClose: boolean) {
+    const modal = document.getElementById('difficulty-modal')
+    if (!modal) return
+    this.paused = true
+    modal.classList.remove('hidden')
+    modal.querySelectorAll<HTMLButtonElement>('[data-difficulty]').forEach((b) => {
+      b.classList.toggle('current', b.dataset.difficulty === this.difficulty)
+    })
+    const close = modal.querySelector<HTMLButtonElement>('[data-close]')
+    if (close) close.hidden = !canClose
+  }
+
+  private closeDifficultyPicker() {
+    document.getElementById('difficulty-modal')?.classList.add('hidden')
+    this.paused = false
+    this.clock.getDelta() // drop the time spent in the menu
+  }
+
+  private bindDifficultyUi() {
+    const modal = document.getElementById('difficulty-modal')
+    if (!modal) return
+    modal.querySelectorAll<HTMLButtonElement>('[data-difficulty]').forEach((b) => {
+      const d = b.dataset.difficulty
+      if (!isDifficulty(d)) return
+      const p = DIFFICULTIES[d]
+      b.innerHTML = `<strong>${p.label}</strong><span>${p.description}</span>`
+      b.addEventListener('click', () => {
+        this.isNewGame = false
+        this.setDifficulty(d)
+        this.closeDifficultyPicker()
+      })
+    })
+    modal.querySelector('[data-close]')?.addEventListener('click', () => this.closeDifficultyPicker())
+    document
+      .getElementById('difficulty-btn')
+      ?.addEventListener('click', () => this.openDifficultyPicker(true))
+    this.updateDifficultyButton()
   }
 
   private refreshPadVisibility() {
@@ -1257,9 +1409,11 @@ export class Game {
   }
 
   start() {
+    this.bindDifficultyUi()
+    if (this.isNewGame) this.openDifficultyPicker(false)
     const loop = () => {
       const dt = Math.min(this.clock.getDelta(), 0.05)
-      this.update(dt)
+      if (!this.paused) this.update(dt)
       this.renderer.render(this.scene, this.camera)
       requestAnimationFrame(loop)
     }
@@ -1274,14 +1428,15 @@ export class Game {
     this.updateShop2(dt)
     this.updateMoneyPickup(dt)
     this.updateUnlocks(dt)
-    this.updateTractor(dt)
+    this.updateTractor(this.tractor, dt)
+    this.updateTractor(this.wheatCombine, dt)
     this.updateHelper(dt)
     this.updateCollector(dt)
     this.updateCollector2(dt)
     this.updateCollectorTrain(dt)
     this.updateProcessorBot(dt)
     this.updateEggRunner(dt)
-    this.updateJarLoader(dt)
+    this.updateJarLoaders(dt)
     this.updateShop2Helper(dt)
     this.updateProcessing(dt)
     this.updateChickens(dt)
@@ -1532,18 +1687,34 @@ export class Game {
     }
   }
 
-  private getOrCreateGroundStack(pos: THREE.Vector3, mode: 'dump' | 'pile' = 'pile'): GroundStack {
+  private getOrCreateGroundStack(
+    pos: THREE.Vector3,
+    mode: 'dump' | 'pile' = 'pile',
+    spec?: DumpSpec,
+  ): GroundStack {
     let gs = this.groundStacks.find((g) => g.pos.distanceTo(pos) < 0.5)
     if (!gs) {
       const mesh = new THREE.Group()
       mesh.position.copy(pos)
       this.scene.add(mesh)
-      gs = { mesh, kinds: [], pos: pos.clone(), mode }
+      gs = { mesh, kinds: [], pos: pos.clone(), mode, spec }
       this.groundStacks.push(gs)
     } else if (mode === 'dump') {
       gs.mode = 'dump'
+      if (spec) gs.spec = spec
     }
     return gs
+  }
+
+  private dumpSpec(gs: GroundStack): DumpSpec {
+    return (
+      gs.spec ?? { padX: DUMP_PAD_X, padZ: DUMP_PAD_Z, cols: DUMP_COLS, rows: DUMP_ROWS, layers: DUMP_LAYERS }
+    )
+  }
+
+  private dumpCapacity(gs: GroundStack): number {
+    const s = this.dumpSpec(gs)
+    return s.cols * s.rows * s.layers
   }
 
   private rebuildGroundStack(gs: GroundStack) {
@@ -1565,11 +1736,12 @@ export class Game {
 
   /** Fill dump as a sandbox grid: cols × 12 rows, up to 4 items stacked per cell. */
   private rebuildDumpStack(gs: GroundStack) {
-    const show = Math.min(gs.kinds.length, DUMP_CAPACITY)
-    const spanX = DUMP_PAD_X - 1.0
-    const spanZ = DUMP_PAD_Z - 1.0
-    const stepX = DUMP_COLS > 1 ? spanX / (DUMP_COLS - 1) : 0
-    const stepZ = DUMP_ROWS > 1 ? spanZ / (DUMP_ROWS - 1) : 0
+    const { padX, padZ, cols, rows, layers } = this.dumpSpec(gs)
+    const show = Math.min(gs.kinds.length, cols * rows * layers)
+    const spanX = padX - 1.0
+    const spanZ = padZ - 1.0
+    const stepX = cols > 1 ? spanX / (cols - 1) : 0
+    const stepZ = rows > 1 ? spanZ / (rows - 1) : 0
     const baseY = 0.34
 
     while (gs.mesh.children.length > show) {
@@ -1577,14 +1749,14 @@ export class Game {
     }
     const place = (item: THREE.Object3D, i: number) => {
       // Fill each cell up to 4 high before moving to the next point
-      const layer = i % DUMP_LAYERS
-      const cell = Math.floor(i / DUMP_LAYERS)
-      const col = cell % DUMP_COLS
-      const row = Math.floor(cell / DUMP_COLS)
+      const layer = i % layers
+      const cell = Math.floor(i / layers)
+      const col = cell % cols
+      const row = Math.floor(cell / cols)
       item.position.set(
-        (col - (DUMP_COLS - 1) / 2) * stepX,
+        (col - (cols - 1) / 2) * stepX,
         baseY + layer * 0.34,
-        (row - (DUMP_ROWS - 1) / 2) * stepZ,
+        (row - (rows - 1) / 2) * stepZ,
       )
     }
     for (let i = 0; i < gs.mesh.children.length; i++) {
@@ -1602,11 +1774,15 @@ export class Game {
     for (const field of this.crops) {
       if (field.count >= field.max) continue
       field.timer += dt
-      if (field.timer >= field.regen) {
-        field.timer = 0
+      const interval = field.regen * this.preset.regenMul
+      let grown = false
+      while (field.timer >= interval && field.count < field.max) {
+        field.timer -= interval
         field.count++
-        this.rebuildCropVisual(field)
+        grown = true
       }
+      if (field.count >= field.max) field.timer = 0
+      if (grown) this.rebuildCropVisual(field)
     }
     this.updateIrrigationVisuals()
   }
@@ -1708,16 +1884,21 @@ export class Game {
     obj.rotation.y = Math.atan2(dx, dz)
   }
 
+  /** Two-column carry stack so big loads (16 jars / crops) don't tower over the map. */
+  private placeCarried(item: THREE.Object3D, i: number) {
+    item.position.set(((i % 2) - 0.5) * 0.36, Math.floor(i / 2) * 0.32, 0)
+  }
+
   /** Movement step for delivery workers (helper, bots, runners). */
   private workerStep(speed: number, dt: number) {
     return speed * this.workerSpeedMul * dt
   }
 
   private itemValue(kind: ItemKind): number {
-    if (kind === 'jar') return JAR_VALUE
-    if (kind === 'egg') return EGG_VALUE
-    if (kind === 'wheat') return WHEAT_VALUE
-    return CROP_VALUE
+    if (kind === 'jar') return this.scaledIncome(JAR_VALUE)
+    if (kind === 'egg') return this.scaledIncome(EGG_VALUE)
+    if (kind === 'wheat') return this.scaledIncome(WHEAT_VALUE)
+    return this.scaledIncome(CROP_VALUE)
   }
 
   private progressGoal(n: number, kind?: ItemKind) {
@@ -1753,6 +1934,7 @@ export class Game {
       this.goal.label = 'Mega sales'
       this.goal.current = 0
     }
+    this.goal = this.scaledGoal(this.goal)
   }
 
   private dropMoney(amount: number, at: THREE.Vector3 = this.moneyDropPos) {
@@ -1822,12 +2004,7 @@ export class Game {
           pad.lastShown = left
           this.refreshUnlockLabel(pad)
         }
-        if (pad.paid >= pad.cost) {
-          pad.done = true
-          pad.active = false
-          this.scene.remove(pad.mesh)
-          this.onUnlock(pad.id)
-        }
+        if (pad.paid >= pad.cost) this.completePad(pad)
       }
     }
   }
@@ -1965,9 +2142,9 @@ export class Game {
     }
 
     if (id === 'jarLoader') {
-      this.spawnJarLoader()
+      this.syncJarLoaders()
       this.stage = Math.max(this.stage, 15)
-      if (!silent) this.setHint('Jar loader fills truck bay A. Speed up the couriers next!')
+      if (!silent) this.setHint('Jar loader fills the truck bays. Speed up the couriers next!')
     }
 
     if (id === 'workerSpeed') {
@@ -1978,6 +2155,7 @@ export class Game {
 
     if (id === 'truckBay2') {
       this.activateTruckStation('B')
+      this.syncJarLoaders()
       this.stage = Math.max(this.stage, 17)
       if (!silent) this.setHint('Truck bay B online. Unlock the wheat field!')
     }
@@ -1999,7 +2177,12 @@ export class Game {
     if (id === 'field2') {
       this.spawnField2()
       this.stage = Math.max(this.stage, 18)
-      if (!silent) this.setHint('Wheat field ready. Boost it or build a second shop!')
+      if (!silent) this.setHint('Wheat field ready. Buy the wheat combine, boost it or build a second shop!')
+    }
+
+    if (id === 'wheatCombine') {
+      this.spawnWheatCombine()
+      if (!silent) this.setHint('Wheat combine harvests WHEAT → WHEAT DUMP. Shop 2 helper sells it!')
     }
 
     if (id === 'wheatUp') {
@@ -2053,6 +2236,7 @@ export class Game {
 
     if (id === 'truckBay3') {
       this.activateTruckStation('C')
+      this.syncJarLoaders()
       this.stage = Math.max(this.stage, 23)
       this.maxStack = 42
       if (!silent) this.setHint('Three truck bays running. Expand west for the factory line!')
@@ -2165,96 +2349,191 @@ export class Game {
     this.hintTimer = 10
   }
 
-  private spawnTractor() {
-    if (this.tractor) return
+  private makeHarvester(
+    kind: 'crop' | 'wheat',
+    dumpPos: THREE.Vector3,
+    opts: { baseCapacity: number; capacityPerRegen: number; baseSpeed: number; dumpSpec?: DumpSpec },
+  ): TractorAI {
     const mesh = makeTractorMesh()
-    mesh.position.set(this.dumpPos.x, 0, this.dumpPos.z)
+    mesh.position.set(dumpPos.x, 0, dumpPos.z)
     this.scene.add(mesh)
-    this.tractor = {
+    return {
       mesh,
+      kind,
       cargo: [],
-      capacity: TRACTOR_CARGO_BASE,
+      capacity: opts.baseCapacity,
+      baseCapacity: opts.baseCapacity,
+      capacityPerRegen: opts.capacityPerRegen,
+      hasTrailer: false,
+      baseSpeed: opts.baseSpeed,
+      dumpPos,
+      dumpSpec: opts.dumpSpec,
+      harvestPoint: dumpPos.clone(),
       state: 'seek',
-      targetPile: null,
       timer: 0,
     }
+  }
+
+  private spawnTractor() {
+    if (this.tractor) return
+    this.tractor = this.makeHarvester('crop', this.dumpPos, {
+      baseCapacity: TRACTOR_CARGO_BASE,
+      capacityPerRegen: 8,
+      baseSpeed: TRACTOR_SPEED,
+    })
   }
 
   private upgradeTractor() {
     this.spawnTractor()
     const tr = this.tractor
-    if (!tr) return
-    tr.capacity = Math.max(tr.capacity, TRACTOR_CARGO_UP)
+    if (!tr || tr.hasTrailer) return
+    tr.hasTrailer = true
+    tr.baseCapacity = Math.max(tr.baseCapacity, TRACTOR_CARGO_UP)
+    tr.capacityPerRegen = 12
     attachTractorTrailer(tr.mesh)
   }
 
-  private placeTractorCargoVisual(tr: TractorAI, item: THREE.Object3D) {
-    const bedCargo = tr.mesh.getObjectByName('cargo') as THREE.Group
-    const trailerCargo = tr.mesh.getObjectByName('trailerCargo') as THREE.Group | null
-    const bedMax = 8
-    const n = tr.cargo.length // already pushed
-    if (!trailerCargo || n <= bedMax) {
-      const i = bedCargo.children.length
-      item.position.set(((i % 2) - 0.5) * 0.35, Math.floor(i / 2) * 0.28, 0)
-      bedCargo.add(item)
-      return
+  /** Wheat combine (red tractor) + its small WHEAT DUMP sandbox north of the wheat field. */
+  private spawnWheatCombine() {
+    if (!this.scene.getObjectByName('wheatDumpSandbox')) {
+      const dump = makeDumpSandbox(WHEAT_DUMP_SPEC.padX, WHEAT_DUMP_SPEC.padZ)
+      dump.name = 'wheatDumpSandbox'
+      dump.position.set(this.wheatDumpPos.x, 0, this.wheatDumpPos.z)
+      this.scene.add(dump)
+      // Low label on the near (north) side so it doesn't collide with the field's WHEAT label
+      const label = makeLabelSprite('W-DUMP', '#fef08a')
+      label.position.set(this.wheatDumpPos.x, 0.45, this.wheatDumpPos.z + 1.1)
+      this.scene.add(label)
     }
-    const i = trailerCargo.children.length
-    const col = i % 3
-    const row = Math.floor(i / 3) % 3
-    const layer = Math.floor(i / 9)
-    item.position.set((col - 1) * 0.38, layer * 0.3, (row - 1) * 0.4)
-    trailerCargo.add(item)
+    this.getOrCreateGroundStack(this.wheatDumpPos, 'dump', WHEAT_DUMP_SPEC)
+    if (this.wheatCombine) return
+    const tr = this.makeHarvester('wheat', this.wheatDumpPos, {
+      baseCapacity: WHEAT_COMBINE_CARGO,
+      capacityPerRegen: 8,
+      baseSpeed: WHEAT_COMBINE_SPEED,
+      dumpSpec: WHEAT_DUMP_SPEC,
+    })
+    // Repaint the yellow body red so it reads as a different machine
+    const red = new THREE.MeshLambertMaterial({ color: 0xdc2626 })
+    const darkRed = new THREE.MeshLambertMaterial({ color: 0x991b1b })
+    tr.mesh.traverse((o) => {
+      const m = o as THREE.Mesh
+      if (!m.isMesh || !(m.material instanceof THREE.MeshLambertMaterial)) return
+      const hex = m.material.color.getHex()
+      if (hex === 0xeab308) m.material = red
+      else if (hex === 0xca8a04) m.material = darkRed
+    })
+    tr.mesh.position.z -= 1.8 // start on the soil, not inside the sandbox
+    this.wheatCombine = tr
   }
 
-  private clearTractorCargoVisual(tr: TractorAI) {
+  /**
+   * Cargo per trip: enough to carry `capacityPerRegen` seconds' worth of regrowth,
+   * so the machine outpaces the field at every upgrade tier and difficulty.
+   */
+  private harvesterCapacity(tr: TractorAI, field: CropPile): number {
+    const regen = field.regen * this.preset.regenMul
+    const wanted = Math.max(tr.baseCapacity, Math.ceil(tr.capacityPerRegen / regen))
+    return Math.max(tr.baseCapacity, Math.min(wanted, field.max))
+  }
+
+  /** Redraw cargo from the count (capped) instead of one mesh per item. */
+  private rebuildTractorCargoVisual(tr: TractorAI) {
     const bedCargo = tr.mesh.getObjectByName('cargo') as THREE.Group | undefined
     const trailerCargo = tr.mesh.getObjectByName('trailerCargo') as THREE.Group | undefined
-    if (bedCargo) while (bedCargo.children.length) bedCargo.remove(bedCargo.children[0]!)
-    if (trailerCargo) while (trailerCargo.children.length) trailerCargo.remove(trailerCargo.children[0]!)
+    const n = tr.cargo.length
+    const bedWant = Math.min(n, TRACTOR_BED_VISUAL)
+    const trailerWant = trailerCargo ? Math.min(Math.max(0, n - TRACTOR_BED_VISUAL), TRACTOR_TRAILER_VISUAL) : 0
+    if (bedCargo) {
+      while (bedCargo.children.length > bedWant) bedCargo.remove(bedCargo.children[bedCargo.children.length - 1]!)
+      while (bedCargo.children.length < bedWant) {
+        const i = bedCargo.children.length
+        const item = makeItem(tr.kind)
+        item.position.set(((i % 2) - 0.5) * 0.35, Math.floor(i / 2) * 0.28, 0)
+        bedCargo.add(item)
+      }
+    }
+    if (trailerCargo) {
+      while (trailerCargo.children.length > trailerWant) {
+        trailerCargo.remove(trailerCargo.children[trailerCargo.children.length - 1]!)
+      }
+      while (trailerCargo.children.length < trailerWant) {
+        const i = trailerCargo.children.length
+        const item = makeItem(tr.kind)
+        item.position.set(((i % 3) - 1) * 0.38, Math.floor(i / 9) * 0.3, ((Math.floor(i / 3) % 3) - 1) * 0.4)
+        trailerCargo.add(item)
+      }
+    }
   }
 
-  private updateTractor(dt: number) {
-    const tr = this.tractor
-    if (!tr) return
+  /** Pick a spot inside the field near its north edge, sweeping across the rows. */
+  private pickHarvestPoint(tr: TractorAI, field: CropPile) {
+    const sweep = Math.max(0, field.halfW - 0.8)
+    tr.harvestPoint.set(
+      field.pos.x + Math.sin(this.clock.elapsedTime * 0.9) * sweep,
+      0,
+      field.pos.z + field.halfD - Math.min(2.5, field.halfD),
+    )
+  }
 
-    const field = this.getField()
+  private updateTractor(tr: TractorAI | null, dt: number) {
+    if (!tr) return
+    const field = tr.kind === 'crop' ? this.getField() : this.getWheatField()
+    if (!field) return
+    const step = this.workerStep(tr.baseSpeed, dt)
 
     if (tr.state === 'seek') {
-      if (field.count <= 0) return
-      tr.targetPile = field
-      // Drive to a point on the field near the crop mass
-      const harvestSpot = field.pos.clone()
-      harvestSpot.x += Math.sin(this.clock.elapsedTime * 0.4) * 1.5
-      this.moveToward(tr.mesh, harvestSpot, 4.5 * dt)
-      if (this.inField(tr.mesh.position, field, 0.2)) {
+      if (field.count <= 0) return // nothing grown yet — wait where we are
+      // First trip, or the field was resized (map expand) → re-aim inside the soil
+      if (!this.inField(tr.harvestPoint, field, -0.3)) this.pickHarvestPoint(tr, field)
+      this.moveToward(tr.mesh, tr.harvestPoint, step)
+      if (tr.mesh.position.distanceTo(tr.harvestPoint) < 0.4) {
         tr.state = 'harvest'
         tr.timer = 0
+        tr.capacity = this.harvesterCapacity(tr, field)
       }
     } else if (tr.state === 'harvest') {
+      // Several items per frame when the field regrows fast (keeps the timer remainder)
+      const interval = Math.min(TRACTOR_HARVEST_INTERVAL, (field.regen * this.preset.regenMul) / 4)
       tr.timer += dt
-      if (field.count <= 0 || tr.cargo.length >= tr.capacity) {
-        tr.state = 'dump'
-        return
-      }
-      if (tr.timer >= 0.13) {
-        tr.timer = 0
+      let took = 0
+      while (tr.timer >= interval && field.count > 0 && tr.cargo.length < tr.capacity) {
+        tr.timer -= interval
         field.count--
+        tr.cargo.push(tr.kind)
+        took++
+      }
+      if (took > 0) {
         this.rebuildCropVisual(field)
-        tr.cargo.push('crop')
-        this.placeTractorCargoVisual(tr, makeCropItem())
+        this.rebuildTractorCargoVisual(tr)
+      }
+      if (field.count <= 0 || tr.cargo.length >= tr.capacity) {
+        if (tr.cargo.length > 0) {
+          tr.state = 'dump'
+        } else {
+          tr.state = 'seek'
+          this.pickHarvestPoint(tr, field)
+        }
       }
     } else if (tr.state === 'dump') {
-      this.moveToward(tr.mesh, this.dumpPos, 4.8 * dt)
-      if (tr.mesh.position.distanceTo(this.dumpPos) < 1.85) {
-        const gs = this.getOrCreateGroundStack(this.dumpPos, 'dump')
-        while (tr.cargo.length && gs.kinds.length < DUMP_CAPACITY) {
+      this.moveToward(tr.mesh, tr.dumpPos, step)
+      if (tr.mesh.position.distanceTo(tr.dumpPos) < 1.85) {
+        const gs = this.getOrCreateGroundStack(tr.dumpPos, 'dump', tr.dumpSpec)
+        const cap = this.dumpCapacity(gs)
+        let moved = 0
+        while (tr.cargo.length && gs.kinds.length < cap) {
           gs.kinds.push(tr.cargo.pop()!)
+          moved++
         }
-        this.clearTractorCargoVisual(tr)
-        this.rebuildGroundStack(gs)
-        tr.state = 'seek'
-        tr.targetPile = null
+        if (moved > 0) {
+          this.rebuildGroundStack(gs)
+          this.rebuildTractorCargoVisual(tr)
+        }
+        // Dump full → keep the rest on board and wait here until there is room
+        if (tr.cargo.length === 0) {
+          tr.state = 'seek'
+          this.pickHarvestPoint(tr, field)
+        }
       }
     }
   }
@@ -2283,7 +2562,10 @@ export class Game {
 
     if (h.state === 'seek') {
       // Prefer tractor dump, else any crop pile
-      const dump = this.groundStacks.find((g) => g.kinds.length > 0)
+      const dump = this.groundStacks.find(
+        // Before shop 2 exists the shop-1 helper also sells wheat from the WHEAT DUMP
+        (g) => g.kinds.length > 0 && (!this.shop2Ready || g.pos.distanceTo(this.wheatDumpPos) > 0.5),
+      )
       if (dump) {
         h.target.copy(dump.pos)
         this.moveToward(h.mesh, h.target, this.workerStep(4.2, dt))
@@ -2345,6 +2627,7 @@ export class Game {
     if (this.processCooldown > 0) return
     if (this.player.position.distanceTo(this.processZone) > 1.4) return
     if (!this.stack.includes('crop')) return
+    if (this.getOrCreateGroundStack(this.processOutPos).kinds.length >= PROCESS_OUT_CAP) return
     this.convertOneCropFromPlayer()
     this.processCooldown = 0.28
   }
@@ -2359,10 +2642,8 @@ export class Game {
     for (const k of kinds) this.pushStack(k)
 
     const out = this.getOrCreateGroundStack(this.processOutPos)
-    if (out.kinds.length < 24) {
-      out.kinds.push('jar')
-      this.rebuildGroundStack(out)
-    }
+    out.kinds.push('jar')
+    this.rebuildGroundStack(out)
   }
 
   private spawnChickens() {
@@ -2628,7 +2909,9 @@ export class Game {
   private completeTruck(st: TruckStation) {
     const t = st.truck
     if (!t) return
-    const bonus = 180 + this.stage * 15 + (st.id === 'C' ? 40 : st.id === 'B' ? 20 : 0)
+    const bonus = this.scaledIncome(
+      180 + this.stage * 15 + (st.id === 'C' ? 40 : st.id === 'B' ? 20 : 0),
+    )
     this.dropMoney(bonus, this.moneyDropPos)
     this.money += Math.floor(bonus * 0.25)
     if (this.goal.id === 'truck') {
@@ -2959,7 +3242,7 @@ export class Game {
   private completeTrain() {
     const t = this.train
     if (!t || t.cargoCount <= 0) return
-    const payout = Math.floor(t.cargoValue * this.trainPayoutMul)
+    const payout = this.scaledIncome(Math.floor(t.cargoValue * this.trainPayoutMul))
     this.dropMoney(payout, this.trainMoneyPos)
     this.money += Math.floor(payout * 0.2)
     this.setHint(`Train shipped! +$${payout}`)
@@ -3029,43 +3312,108 @@ export class Game {
     }
   }
 
-  private spawnJarLoader() {
-    if (this.jarLoader) return
+  /** One jar courier per active jar truck bay (once the jarLoader unlock is bought). */
+  private syncJarLoaders() {
+    if (!this.unlocked.has('jarLoader')) return
+    for (const st of this.truckStations) {
+      if (!st.active || !st.accepts.includes('jar')) continue
+      if (this.jarLoaders.some((w) => w.bay === st.id)) continue
+      this.spawnJarLoader(st.id)
+    }
+  }
+
+  private spawnJarLoader(bay: string) {
     const mesh = makeCharacter(0xfb923c)
     mesh.position.copy(this.processOutPos)
     this.scene.add(mesh)
     const stackRoot = new THREE.Group()
     stackRoot.position.set(0, 1.35, 0)
     mesh.add(stackRoot)
-    this.jarLoader = {
+    this.jarLoaders.push({
       mesh,
       stack: [],
       stackRoot,
       state: 'seek',
       target: this.processOutPos.clone(),
       timer: 0,
-    }
+      bay,
+    })
   }
 
-  private updateJarLoader(dt: number) {
-    const w = this.jarLoader
-    if (!w) return
+  /** How many more items of `kind` a station's truck can take right now (0 if not parked / full). */
+  private jarTruckNeeds(st: TruckStation, kind: ItemKind = 'jar'): number {
+    const t = st.truck
+    if (!st.active || !st.accepts.includes(kind) || !t || t.state !== 'wait') return 0
+    return Math.max(0, t.need - t.filled)
+  }
+
+  /** Own bay first; otherwise help the parked truck (that accepts `kind`) closest to full. */
+  private pickJarStation(w: JarLoaderAI, kind: ItemKind = 'jar'): TruckStation | null {
+    const own = this.truckStations.find((s) => s.id === w.bay)
+    if (own && this.jarTruckNeeds(own, kind) > 0) return own
+    let best: TruckStation | null = null
+    let bestRatio = -1
+    for (const s of this.truckStations) {
+      if (this.jarTruckNeeds(s, kind) <= 0) continue
+      const ratio = s.truck!.filled / s.truck!.need
+      if (ratio > bestRatio) {
+        best = s
+        bestRatio = ratio
+      }
+    }
+    return best
+  }
+
+  private updateJarLoaders(dt: number) {
+    this.jarLoaders.forEach((w, i) => this.updateJarLoader(w, i, dt))
+  }
+
+  private updateJarLoader(w: JarLoaderAI, index: number, dt: number) {
     if (w.state === 'seek') {
+      // Bay C also takes wheat: its loader grabs it from the nearby WHEAT DUMP when its truck needs some
+      const own = this.truckStations.find((s) => s.id === w.bay)
+      const wheatDump =
+        own && this.jarTruckNeeds(own, 'wheat') > 0
+          ? this.groundStacks.find(
+              (g) => g.pos.distanceTo(this.wheatDumpPos) < 0.5 && g.kinds.includes('wheat'),
+            )
+          : undefined
+      if (wheatDump) {
+        this.moveToward(w.mesh, wheatDump.pos, this.workerStep(4.2, dt))
+        if (this.nearGroundStack(w.mesh.position, wheatDump) || w.mesh.position.distanceTo(wheatDump.pos) < 1.2) {
+          while (w.stack.length < JAR_LOADER_CAPACITY && wheatDump.kinds.includes('wheat')) {
+            wheatDump.kinds.splice(wheatDump.kinds.lastIndexOf('wheat'), 1)
+            const item = makeItem('wheat')
+            this.placeCarried(item, w.stack.length)
+            w.stackRoot.add(item)
+            w.stack.push('wheat')
+          }
+          this.rebuildGroundStack(wheatDump)
+          if (w.stack.length > 0) w.state = 'carry'
+        }
+        return
+      }
       const jars = this.groundStacks.find(
         (g) => g.pos.distanceTo(this.processOutPos) < 0.6 && g.kinds.includes('jar'),
       )
-      if (!jars || !jars.kinds.includes('jar')) {
-        this.moveToward(w.mesh, this.processOutPos, this.workerStep(3, dt))
+      if (!jars) {
+        // Nothing to pick up — wait beside the processor (spread out so loaders don't overlap)
+        const idle = new THREE.Vector3(
+          this.processOutPos.x,
+          0,
+          this.processOutPos.z + (index - 1) * 0.8,
+        )
+        this.moveToward(w.mesh, idle, this.workerStep(3, dt))
         return
       }
       this.moveToward(w.mesh, jars.pos, this.workerStep(4.2, dt))
       if (w.mesh.position.distanceTo(jars.pos) < 1.2) {
-        while (w.stack.length < 8 && jars.kinds.includes('jar')) {
+        while (w.stack.length < JAR_LOADER_CAPACITY && jars.kinds.includes('jar')) {
           const i = jars.kinds.lastIndexOf('jar')
           if (i < 0) break
           jars.kinds.splice(i, 1)
           const item = makeItem('jar')
-          item.position.y = w.stack.length * 0.32
+          this.placeCarried(item, w.stack.length)
           w.stackRoot.add(item)
           w.stack.push('jar')
         }
@@ -3073,16 +3421,12 @@ export class Game {
         if (w.stack.length > 0) w.state = 'carry'
       }
     } else if (w.state === 'carry') {
-      const st =
-        this.truckStations.find(
-          (s) =>
-            s.active &&
-            s.truck?.state === 'wait' &&
-            s.truck.filled < s.truck.need &&
-            s.accepts.includes('jar'),
-        ) ?? this.truckStations.find((s) => s.active && s.accepts.includes('jar'))
+      const kind = w.stack[w.stack.length - 1] ?? 'jar'
+      const st = this.pickJarStation(w, kind)
       if (!st) {
-        this.moveToward(w.mesh, this.processOutPos, this.workerStep(3, dt))
+        // No truck parked anywhere — hold the cargo at our own bay until one arrives
+        const own = this.truckStations.find((s) => s.id === w.bay)
+        if (own) this.moveToward(w.mesh, own.loadZone, this.workerStep(4.4, dt))
         return
       }
       this.moveToward(w.mesh, st.loadZone, this.workerStep(4.4, dt))
@@ -3093,36 +3437,20 @@ export class Game {
       }
     } else if (w.state === 'deposit') {
       w.timer += dt
-      const st = this.truckStations.find(
-        (s) => s.active && s.loadZone.distanceTo(w.target) < 0.5,
-      )
-      if (!st || !st.truck || st.truck.state !== 'wait') {
-        // Dump jars back to process out if truck left
-        if (w.stack.length === 0) {
-          w.state = 'seek'
-          return
-        }
-        if (w.timer >= 0.15) {
-          w.timer = 0
-          w.stack.pop()
-          const child = w.stackRoot.children[w.stackRoot.children.length - 1]
-          if (child) w.stackRoot.remove(child)
-          const out = this.getOrCreateGroundStack(this.processOutPos)
-          out.kinds.push('jar')
-          this.rebuildGroundStack(out)
-        }
-        if (w.stack.length === 0) w.state = 'seek'
+      const st = this.truckStations.find((s) => s.active && s.loadZone.distanceTo(w.target) < 0.5)
+      const kind = w.stack[w.stack.length - 1] ?? 'jar'
+      if (!st || this.jarTruckNeeds(st, kind) <= 0) {
+        // Truck filled up or drove off — take leftover cargo to another truck
+        w.state = w.stack.length > 0 ? 'carry' : 'seek'
         return
       }
       if (w.timer >= 0.18 && w.stack.length > 0) {
         w.timer = 0
-        if (this.tryLoadItemOntoTruck(st, 'jar')) {
+        if (this.tryLoadItemOntoTruck(st, kind)) {
           w.stack.pop()
           const child = w.stackRoot.children[w.stackRoot.children.length - 1]
           if (child) w.stackRoot.remove(child)
           if (st.truck && st.truck.filled >= st.truck.need) this.completeTruck(st)
-        } else {
-          w.state = 'seek'
         }
       }
       if (w.stack.length === 0) w.state = 'seek'
@@ -3437,12 +3765,12 @@ export class Game {
         b.target.copy(src.pos)
         this.moveToward(b.mesh, b.target, this.workerStep(4, dt))
         if (b.mesh.position.distanceTo(src.pos) < 1.3) {
-          while (b.stack.length < 8 && src.kinds.includes('crop')) {
+          while (b.stack.length < PROCESSOR_BOT_CARRY && src.kinds.includes('crop')) {
             const i = src.kinds.lastIndexOf('crop')
             if (i < 0) break
             src.kinds.splice(i, 1)
             const item = makeItem('crop')
-            item.position.y = b.stack.length * 0.32
+            this.placeCarried(item, b.stack.length)
             b.stackRoot.add(item)
             b.stack.push('crop')
           }
@@ -3457,10 +3785,10 @@ export class Game {
       b.target.copy(edge)
       this.moveToward(b.mesh, b.target, this.workerStep(4, dt))
       if (this.inField(b.mesh.position, field)) {
-        while (b.stack.length < 8 && field.count > 0) {
+        while (b.stack.length < PROCESSOR_BOT_CARRY && field.count > 0) {
           field.count--
           const item = makeItem('crop')
-          item.position.y = b.stack.length * 0.32
+          this.placeCarried(item, b.stack.length)
           b.stackRoot.add(item)
           b.stack.push('crop')
         }
@@ -3476,16 +3804,15 @@ export class Game {
       }
     } else if (b.state === 'deposit') {
       b.timer += dt
-      if (b.timer >= 0.2 && b.stack.length > 0) {
+      const out = this.getOrCreateGroundStack(this.processOutPos)
+      // Output full → hold the crops and wait (previously the crop was silently destroyed)
+      if (b.timer >= 0.1 && b.stack.length > 0 && out.kinds.length < PROCESS_OUT_CAP) {
         b.timer = 0
         b.stack.pop()
         const child = b.stackRoot.children[b.stackRoot.children.length - 1]
         if (child) b.stackRoot.remove(child)
-        const out = this.getOrCreateGroundStack(this.processOutPos)
-        if (out.kinds.length < 28) {
-          out.kinds.push('jar')
-          this.rebuildGroundStack(out)
-        }
+        out.kinds.push('jar')
+        this.rebuildGroundStack(out)
       }
       if (b.stack.length === 0) b.state = 'seek'
     }
@@ -3549,6 +3876,7 @@ export class Game {
       portalsActive: [...this.portalsActive],
       collectorMoveMul: this.collectorMoveMul,
       collectorGrabMul: this.collectorGrabMul,
+      difficulty: this.difficulty,
     }
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify(data))
@@ -3570,6 +3898,15 @@ export class Game {
     try {
       const data = JSON.parse(raw) as SaveData
       if ((data.v !== 1 && data.v !== 2) || !Array.isArray(data.unlocked)) return
+
+      // Saves from before difficulty existed keep the original (normal) balance
+      this.isNewGame = false
+      this.difficulty = isDifficulty(data.difficulty) ? data.difficulty : DEFAULT_DIFFICULTY
+      for (const pad of this.unlockPads) {
+        pad.cost = this.scaledCost(pad.baseCost)
+        pad.lastShown = pad.cost
+        this.refreshUnlockLabel(pad)
+      }
 
       for (const id of UNLOCK_ORDER) {
         if (!data.unlocked.includes(id)) continue
