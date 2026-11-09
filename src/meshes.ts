@@ -844,7 +844,7 @@ export function makeSuperRaceCar(): THREE.Group {
   return g
 }
 
-export function makeTruck(): THREE.Group {
+function buildTruck(): THREE.Group {
   const g = new THREE.Group()
   // Cab faces +Z so moveToward rotation is correct
 
@@ -959,7 +959,7 @@ export function makeTruck(): THREE.Group {
   return g
 }
 
-export function makeCharacter(bodyColor: number): THREE.Group {
+function buildCharacter(bodyColor: number): THREE.Group {
   const g = new THREE.Group()
   const legs = new THREE.Mesh(
     new THREE.BoxGeometry(0.45, 0.45, 0.3),
@@ -1508,7 +1508,7 @@ export function makePortalGate(color = 0xa855f7): THREE.Group {
 
 const GOODS_COLORS = [0xfbbf24, 0x22d3ee, 0xa855f7, 0xf43f5e]
 
-export function makeGoods(tier: 0 | 1 | 2 | 3 = 0): THREE.Group {
+function buildGoods(tier: 0 | 1 | 2 | 3): THREE.Group {
   const g = new THREE.Group()
   const size = 0.45 + tier * 0.12
   const box = new THREE.Mesh(
@@ -1632,4 +1632,39 @@ export function makeIrrigation(halfW: number, halfD: number, tier: 1 | 2 = 1): T
 
   g.userData.tier = tier
   return g
+}
+
+/*
+ * Customers, trucks and belt goods spawn constantly. Building them from scratch every time
+ * allocated new geometries/materials that were never disposed (GPU memory grew ~340 objects/min
+ * in the late game). Instead build each variant once and clone it: Object3D.clone() shares
+ * geometry and materials, so removing a clone from the scene leaks nothing.
+ */
+const templateCache = new Map<string, THREE.Group>()
+
+function cachedClone(key: string, build: () => THREE.Group): THREE.Group {
+  let t = templateCache.get(key)
+  if (!t) {
+    t = build()
+    templateCache.set(key, t)
+  }
+  return t.clone()
+}
+
+export function makeCharacter(bodyColor: number): THREE.Group {
+  return cachedClone(`char:${bodyColor}`, () => buildCharacter(bodyColor))
+}
+
+export function makeGoods(tier: 0 | 1 | 2 | 3 = 0): THREE.Group {
+  return cachedClone(`goods:${tier}`, () => buildGoods(tier))
+}
+
+export function makeTruck(): THREE.Group {
+  return cachedClone('truck', buildTruck)
+}
+
+/** Free a label sprite's per-instance canvas texture + material. */
+export function disposeLabel(sprite: THREE.Sprite) {
+  sprite.material.map?.dispose()
+  sprite.material.dispose()
 }

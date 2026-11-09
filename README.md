@@ -26,7 +26,8 @@ Open http://127.0.0.1:5173/ (or the Network URL for LAN).
 - **PROCESS** — crops → jars
 - **LOAD-A/B/C** — load trucks
 - **DEPOT** — west goods train bay (after factory line)
-- Stand on unlock pads to spend cash
+- Stand on unlock pads to spend cash (only the nearest pad is charged; a pad that appears under you needs you to step off and back on)
+- **Space / E** or the on-screen **DRIVE / EXIT** button — get in / out of a car (after NoRiseRing)
 
 ## Difficulty
 
@@ -45,7 +46,7 @@ Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and go
 8. **Boots** — move faster  
 9. **Collector** — picks up cash (shop 1)  
 10. **Collector upgrade** — faster scoop for all collectors  
-11. **Truck bay A** — jar orders  
+11. **Truck bay A** — jar orders (a full truck pays the jars' shop value plus a delivery bonus)  
 12. **Auto-process** — factory bot  
 
 ### Late-game
@@ -76,9 +77,9 @@ Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and go
 30. **Collector upgrade III** — max scoop speed  
 31. **Factory / conveyor / train upgrades** — faster spawn, faster belt, bigger payouts  
 32. **Portals 1–3** — stack on the belt (scale + value tiers)  
-33. **NoRiseRing** — builds the street circuit north of the farm  
+33. **NoRiseRing** — builds the street circuit north of the farm (pad by the north gate, after portal 3)  
 
-Goals in the top-left pay cash when completed.
+Goals in the top-left pay cash when completed. They follow the unlock order (sell → jars → eggs → trucks → bigger sales); while the building a goal needs isn't bought yet, a "Sell items" goal stands in.
 
 ## Save
 

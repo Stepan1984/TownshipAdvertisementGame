@@ -4,9 +4,15 @@ export class Input {
   keys = new Set<string>()
   joy: Vec2 = { x: 0, y: 0 }
   private activeId: number | null = null
+  /** Keys pressed since last consumed (no auto-repeat) — for one-shot actions. */
+  private pressed = new Set<string>()
+  private actionQueued = false
 
   constructor() {
-    window.addEventListener('keydown', (e) => this.keys.add(e.code))
+    window.addEventListener('keydown', (e) => {
+      this.keys.add(e.code)
+      if (!e.repeat) this.pressed.add(e.code)
+    })
     window.addEventListener('keyup', (e) => this.keys.delete(e.code))
 
     const base = document.getElementById('joystick-base')!
@@ -47,6 +53,38 @@ export class Input {
     })
     base.addEventListener('pointerup', clear)
     base.addEventListener('pointercancel', clear)
+
+    // Alt-Tab / tab switch never delivers keyup: drop everything so the player doesn't walk on its own
+    const releaseAll = () => {
+      this.keys.clear()
+      this.pressed.clear()
+      clear()
+    }
+    window.addEventListener('blur', releaseAll)
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseAll()
+    })
+
+    // Touch DRIVE / EXIT button (cars can't be entered without a keyboard otherwise)
+    const drive = document.getElementById('drive-btn')
+    drive?.addEventListener('pointerdown', (e) => {
+      e.preventDefault()
+      this.actionQueued = true
+    })
+  }
+
+  /** True once per physical key press. */
+  consumePress(code: string): boolean {
+    const had = this.pressed.has(code)
+    this.pressed.delete(code)
+    return had
+  }
+
+  /** True once per DRIVE button tap. */
+  consumeAction(): boolean {
+    const had = this.actionQueued
+    this.actionQueued = false
+    return had
   }
 
   get move(): Vec2 {
