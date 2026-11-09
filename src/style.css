@@ -240,3 +240,35 @@ body {
 #difficulty-card button[hidden] {
   display: none;
 }
+
+#drive-btn {
+  position: fixed;
+  right: 164px;
+  bottom: 52px;
+  z-index: 20;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: pointer;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font: inherit;
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: 0.05em;
+  padding: 18px 20px;
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.3);
+}
+
+#drive-btn[hidden] {
+  display: none;
+}
+
+/* Phones: keep the hint above the joystick instead of underneath it */
+@media (max-width: 600px) {
+  #hint {
+    bottom: calc(164px + env(safe-area-inset-bottom, 0px));
+    max-width: calc(100% - 32px);
+  }
+}

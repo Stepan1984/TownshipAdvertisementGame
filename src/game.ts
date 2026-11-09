@@ -15,6 +15,7 @@ import {
   makeChicken,
   makeConveyorSegment,
   makeCoop,
+  disposeLabel,
   makeCounter,
   makeDumpSandbox,
   makeFactory,
@@ -56,8 +57,11 @@ const TRAIN_LOAD_POINT = new THREE.Vector3(BELT_X, 0, 6.6)
  */
 const TRAIN_WAIT = new THREE.Vector3(BELT_X, 0, 11.6)
 /** Matches makeGround size half-extent — rails run to the north grass edge. */
-const GROUND_SIZE = 260
+// 280 so the NoRiseRing north hairpin (outer barrier z ≈ 136) stays on the ground and inside the player clamp
+const GROUND_SIZE = 280
 const GROUND_HALF = GROUND_SIZE / 2
+/** Where the goods train drives off to (kept fixed when the ground was enlarged). */
+const TRAIN_LEAVE_X = -124
 const RAIL_Z_START = 6.5
 /** Where the N–S run bends west (north of the depot / fence). */
 const TRAIN_CURVE_Z0 = 22
@@ -66,6 +70,8 @@ const TRAIN_CURVE_R = 13
 const NORISRING_HALF_Z = 48.5
 
 const MAX_STACK_BASE = 16
+/** Stand within this distance of an unlock pad to pay into it. */
+const PAD_RADIUS = 1.3
 const PLAYER_SPEED = 6.2
 const RACE_CAR_SPEED = 16
 const SUPER_CAR_SPEED = 30
@@ -227,6 +233,10 @@ type UnlockPad = {
   lastShown: number
   prefix: string
   requires?: string
+  /** False while the player was already standing on it when it appeared — must step off first. */
+  armed: boolean
+  /** Seconds until the price label may be redrawn again (avoid a new texture every frame). */
+  labelT: number
 }
 
 type TractorAI = {
@@ -271,6 +281,8 @@ type TruckOrder = {
   leavePos: THREE.Vector3
   label: THREE.Sprite
   cooldown: number
+  /** Shop value of everything loaded — paid back on completion plus a bonus. */
+  cargoValue: number
 }
 
 type TruckStation = {
@@ -377,7 +389,7 @@ export class Game {
   chickens: THREE.Group[] = []
   eggPos = new THREE.Vector3(7.5, 0, -6.0)
   eggTimer = 0
-  goal: Goal = { id: 'sell_items', label: 'Sell items', current: 0, target: 15, reward: 50 }
+  goal: Goal = { id: 'sell', label: 'Sell items', current: 0, target: 15, reward: 50 }
   goalsDone = 0
 
   processorPos = new THREE.Vector3(-6.8, 0, -0.8)
@@ -421,6 +433,7 @@ export class Game {
   /** Currently driven vehicle mesh (raceCar or superCar). */
   private drivenCar: THREE.Group | null = null
   private carInteractCd = 0
+  private driveBtnMode = ''
   trainMoneyPos = new THREE.Vector3(BELT_X + 2.8, 0, 7.8)
 
   private hintEl = document.getElementById('hint')!
@@ -496,6 +509,11 @@ export class Game {
 
     this.onResize()
     window.addEventListener('resize', () => this.onResize())
+    // Autosave runs every 2 s — also save when the tab is hidden or closed
+    window.addEventListener('pagehide', () => this.saveProgress())
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this.saveProgress()
+    })
     this.loadProgress()
     // Rebuild track with latest mesh code (unlock path may have used a cached early return before)
     if (this.unlocked.has('norisring')) this.buildNorisring()
@@ -779,7 +797,7 @@ export class Game {
   }
 
   private trainLeavePos(): THREE.Vector3 {
-    const westX = -GROUND_HALF + 6
+    const westX = TRAIN_LEAVE_X
     return new THREE.Vector3(westX, 0, TRAIN_CURVE_Z0 + TRAIN_CURVE_R)
   }
 
@@ -1118,7 +1136,7 @@ export class Game {
       this.createUnlockPad('processor', 450, new THREE.Vector3(-6.8, 0, 1.0), '🏭', 'helper'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('cashier', 380, new THREE.Vector3(-5.8, 0, 7.3), '🧾', 'processor'),
+      this.createUnlockPad('cashier', 380, new THREE.Vector3(-2.2, 0, 4.6), '🧾', 'processor'),
     )
     this.unlockPads.push(
       this.createUnlockPad('barn', 600, new THREE.Vector3(-7.5, 0, 1.2), '🏠', 'cashier'),
@@ -1143,7 +1161,7 @@ export class Game {
     )
     // Late-game chain
     this.unlockPads.push(
-      this.createUnlockPad('mapExpand', 1400, new THREE.Vector3(-7.5, 0, 5.0), '🗺️', 'autoprocess'),
+      this.createUnlockPad('mapExpand', 1400, new THREE.Vector3(-9.6, 0, 4.0), '🗺️', 'autoprocess'),
     )
     this.unlockPads.push(
       this.createUnlockPad('eggRunner', 1600, new THREE.Vector3(1.2, 0, -1.8), '🥚', 'mapExpand'),
@@ -1233,7 +1251,8 @@ export class Game {
       this.createUnlockPad('portal3', 9000, new THREE.Vector3(-12.4, 0, 4.2), '🌀', 'portal2'),
     )
     this.unlockPads.push(
-      this.createUnlockPad('norisring', 8000, new THREE.Vector3(0, 0, 4.8), '🏎️', 'mapExpand'),
+      // Last farm purchase (after the portals); off the field→SELL walkway so hauling doesn't drain into it
+      this.createUnlockPad('norisring', 8000, new THREE.Vector3(4.6, 0, 9.4), '🏎️', 'portal3'),
     )
     this.unlockPads.push(
       this.createUnlockPad('raceCar', 3500, new THREE.Vector3(3.0, 0, 30.2), '🚗', 'norisring'),
@@ -1275,6 +1294,8 @@ export class Game {
       lastShown: cost,
       prefix,
       requires,
+      armed: true,
+      labelT: 0,
     }
   }
 
@@ -1329,6 +1350,8 @@ export class Game {
     pad.done = true
     pad.active = false
     this.scene.remove(pad.mesh)
+    const label = pad.mesh.getObjectByName('label') as THREE.Sprite | undefined
+    if (label) disposeLabel(label)
     this.onUnlock(pad.id)
   }
 
@@ -1380,6 +1403,10 @@ export class Game {
     for (const pad of this.unlockPads) {
       if (pad.done) continue
       const ready = !pad.requires || this.unlocked.has(pad.requires)
+      if (ready && !pad.active) {
+        // e.g. Field grow II appears on the exact spot of Field grow I — don't keep draining into it
+        pad.armed = !this.player || this.player.position.distanceTo(pad.mesh.position) >= PAD_RADIUS
+      }
       pad.active = ready
       pad.mesh.visible = ready
     }
@@ -1470,8 +1497,14 @@ export class Game {
       const dir = forward.multiplyScalar(-m.y).add(right.multiplyScalar(m.x))
       if (dir.lengthSq() > 0) {
         dir.normalize()
-        this.player.position.x += dir.x * speed * dt
-        this.player.position.z += dir.z * speed * dt
+        // Sub-step near barriers so the hypercar can't tunnel through Armco on a slow frame
+        const step = speed * dt
+        const n = this.solidWalls.length ? Math.max(1, Math.ceil(step / 0.4)) : 1
+        for (let i = 0; i < n; i++) {
+          this.player.position.x += (dir.x * step) / n
+          this.player.position.z += (dir.z * step) / n
+          if (n > 1) this.resolveSolidWalls(this.player.position)
+        }
         const yaw = Math.atan2(dir.x, dir.z)
         this.player.rotation.y = yaw
         if (driving) driving.rotation.y = yaw
@@ -1574,16 +1607,9 @@ export class Game {
     this.superCar = car
   }
 
-  private tryRaceCarInteract() {
-    if (this.carInteractCd > 0) return
-    const want =
-      this.input.keys.has('Space') || this.input.keys.has('KeyE')
-    if (!want) return
-    this.carInteractCd = 0.35
-    if (this.drivenCar) {
-      this.exitRaceCar()
-      return
-    }
+  /** Car within reach of the player on foot (null while driving). */
+  private nearbyCar(): THREE.Group | null {
+    if (this.drivenCar) return null
     let nearest: THREE.Group | null = null
     let best = 2.2
     for (const car of [this.raceCar, this.superCar]) {
@@ -1594,6 +1620,31 @@ export class Game {
         nearest = car
       }
     }
+    return nearest
+  }
+
+  /** Show the touch DRIVE / EXIT button only when it does something. */
+  private syncDriveButton() {
+    const mode = this.drivenCar ? 'exit' : this.nearbyCar() ? 'drive' : ''
+    if (mode === this.driveBtnMode) return
+    this.driveBtnMode = mode
+    const btn = document.getElementById('drive-btn')
+    if (!btn) return
+    btn.hidden = mode === ''
+    btn.textContent = mode === 'exit' ? 'EXIT' : 'DRIVE'
+  }
+
+  private tryRaceCarInteract() {
+    // Edge-triggered: one key press / button tap = one toggle (holding Space no longer flickers)
+    const want = this.input.consumePress('Space') || this.input.consumePress('KeyE') || this.input.consumeAction()
+    this.syncDriveButton()
+    if (this.carInteractCd > 0 || !want) return
+    this.carInteractCd = 0.35
+    if (this.drivenCar) {
+      this.exitRaceCar()
+      return
+    }
+    const nearest = this.nearbyCar()
     if (nearest) this.enterRaceCar(nearest)
   }
 
@@ -1605,7 +1656,7 @@ export class Game {
     this.player.position.z = car.position.z
     this.player.rotation.y = car.rotation.y
     const label = car === this.superCar ? 'Hypercar' : 'Car'
-    this.setHint(`${label} — Space / E to exit`)
+    this.setHint(`${label} — Space / E or EXIT to get out`)
   }
 
   private exitRaceCar() {
@@ -1613,10 +1664,35 @@ export class Game {
     const car = this.drivenCar
     this.drivenCar = null
     this.player.visible = true
-    const side = new THREE.Vector3(1.1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), car.rotation.y)
-    this.player.position.x = car.position.x + side.x
-    this.player.position.z = car.position.z + side.z
+    // Step out on the right, else left, else behind — never through an Armco barrier into the infield
+    const up = new THREE.Vector3(0, 1, 0)
+    const offsets = [new THREE.Vector3(1.1, 0, 0), new THREE.Vector3(-1.1, 0, 0), new THREE.Vector3(0, 0, -1.4)]
+    let exit = car.position.clone()
+    for (const o of offsets) {
+      const c = car.position.clone().add(o.applyAxisAngle(up, car.rotation.y))
+      if (!this.segmentCrossesWall(car.position.x, car.position.z, c.x, c.z)) {
+        exit = c
+        break
+      }
+    }
+    this.player.position.x = exit.x
+    this.player.position.z = exit.z
+    if (this.solidWalls.length) this.resolveSolidWalls(this.player.position)
     this.setHint('Left the car')
+  }
+
+  /** True if the straight line a→b crosses any solid barrier segment. */
+  private segmentCrossesWall(ax: number, az: number, bx: number, bz: number): boolean {
+    const cross = (ox: number, oz: number, px: number, pz: number, qx: number, qz: number) =>
+      (px - ox) * (qz - oz) - (pz - oz) * (qx - ox)
+    for (const w of this.solidWalls) {
+      const d1 = cross(w.ax, w.az, w.bx, w.bz, ax, az)
+      const d2 = cross(w.ax, w.az, w.bx, w.bz, bx, bz)
+      const d3 = cross(ax, az, bx, bz, w.ax, w.az)
+      const d4 = cross(ax, az, bx, bz, w.bx, w.bz)
+      if (d1 * d2 < 0 && d3 * d4 < 0) return true
+    }
+    return false
   }
 
   private pushStack(kind: ItemKind, root = this.stackRoot, list = this.stack) {
@@ -1907,27 +1983,50 @@ export class Game {
     if (this.goal.id === 'truck') return
 
     this.goal.current = Math.min(this.goal.target, this.goal.current + n)
-    if (this.goal.current >= this.goal.target) {
-      const reward = this.goal.reward
-      this.money += reward
-      this.pulseMoney()
-      this.goalsDone++
-      this.nextGoal()
-      this.setHint(`Goal complete! +$${reward}`)
-      this.saveProgress()
-    }
+    if (this.goal.current >= this.goal.target) this.completeGoal()
   }
 
+  /** Pay the current goal and roll the next one (shared by sales and truck goals). */
+  private completeGoal() {
+    const reward = this.goal.reward
+    this.money += reward
+    this.pulseMoney()
+    // Filler goals keep the scripted chain where it is
+    if (this.goal.id !== 'filler') this.goalsDone++
+    this.nextGoal()
+    this.setHint(`Goal complete! +$${reward}`)
+    this.saveProgress()
+  }
+
+  /**
+   * Scripted goals in unlock order. A goal whose building isn't bought yet is
+   * replaced by a "Sell items" filler so the goal bar never freezes.
+   */
   private nextGoal() {
-    const goals: Goal[] = [
+    const goals: (Goal & { requires?: string })[] = [
       { id: 'sell', label: 'Sell items', current: 0, target: 15, reward: 50 },
-      { id: 'jars', label: 'Sell jars', current: 0, target: 10, reward: 120 },
-      { id: 'truck', label: 'Fill truck orders', current: 0, target: 2, reward: 250 },
-      { id: 'eggs', label: 'Sell eggs', current: 0, target: 20, reward: 200 },
+      { id: 'jars', label: 'Sell jars', current: 0, target: 10, reward: 120, requires: 'processor' },
+      { id: 'eggs', label: 'Sell eggs', current: 0, target: 20, reward: 200, requires: 'chickens' },
+      { id: 'truck', label: 'Fill truck orders', current: 0, target: 2, reward: 250, requires: 'truck' },
       { id: 'empire', label: 'Sell anything', current: 0, target: 80, reward: 500 },
     ]
     const idx = Math.min(this.goalsDone, goals.length - 1)
-    this.goal = { ...goals[idx]! }
+    const { requires, ...scripted } = goals[idx]!
+    if (this.goalsDone < goals.length && requires && !this.unlocked.has(requires)) {
+      // Buying some other pad re-runs this: keep the filler's progress instead of resetting it
+      const prev = this.goal?.id === 'filler' ? this.goal.current : 0
+      const filler = this.scaledGoal({
+        id: 'filler',
+        label: 'Sell items',
+        current: 0,
+        target: 20 + this.goalsDone * 10,
+        reward: 60 + this.goalsDone * 30,
+      })
+      filler.current = Math.min(prev, filler.target - 1)
+      this.goal = filler
+      return
+    }
+    this.goal = { ...scripted }
     if (this.goalsDone >= goals.length) {
       this.goal.target = 40 + this.goalsDone * 10
       this.goal.reward = 200 + this.goalsDone * 50
@@ -1992,21 +2091,42 @@ export class Game {
 
   private updateUnlocks(dt: number) {
     if (this.drivenCar) return
+    // Only the closest pad takes money, so overlapping pads never charge twice at once
+    let target: UnlockPad | null = null
+    let best = PAD_RADIUS
     for (const pad of this.unlockPads) {
       if (!pad.active || pad.done) continue
-      if (this.player.position.distanceTo(pad.mesh.position) < 1.3 && this.money > 0) {
-        const rate = (this.unlocked.has('plots') ? 250 : 75) * dt
-        const pay = Math.min(this.money, rate, pad.cost - pad.paid)
-        this.money -= pay
-        pad.paid += pay
-        const left = Math.max(0, Math.ceil(pad.cost - pad.paid))
-        if (left !== pad.lastShown) {
-          pad.lastShown = left
-          this.refreshUnlockLabel(pad)
-        }
-        if (pad.paid >= pad.cost) this.completePad(pad)
+      pad.labelT = Math.max(0, pad.labelT - dt)
+      // Catch up a label left stale when paying stopped inside the redraw throttle window
+      if (pad.labelT <= 0 && pad.lastShown !== Math.max(0, Math.ceil(pad.cost - pad.paid))) {
+        pad.lastShown = Math.max(0, Math.ceil(pad.cost - pad.paid))
+        pad.labelT = 0.1
+        this.refreshUnlockLabel(pad)
+      }
+      const d = this.player.position.distanceTo(pad.mesh.position)
+      if (d >= PAD_RADIUS) {
+        pad.armed = true
+        continue
+      }
+      if (pad.armed && d < best) {
+        best = d
+        target = pad
       }
     }
+    if (!target || this.money <= 0) return
+    const pad = target
+    // Expensive pads fill proportionally faster: never more than ~6 s of standing still
+    const perSec = this.unlocked.has('plots') ? Math.max(250, pad.cost / 6) : 75
+    const pay = Math.min(this.money, perSec * dt, pad.cost - pad.paid)
+    this.money -= pay
+    pad.paid += pay
+    const left = Math.max(0, Math.ceil(pad.cost - pad.paid))
+    if (left !== pad.lastShown && (pad.labelT <= 0 || left === 0)) {
+      pad.lastShown = left
+      pad.labelT = 0.1
+      this.refreshUnlockLabel(pad)
+    }
+    if (pad.paid >= pad.cost) this.completePad(pad)
   }
 
   private onUnlock(id: string, opts?: { silent?: boolean }) {
@@ -2014,6 +2134,8 @@ export class Game {
     const silent = opts?.silent ?? false
     this.unlocked.add(id)
     this.refreshPadVisibility()
+    // A filler goal was standing in for this building's goal — switch to the real one
+    if (this.goal.id === 'filler' && !this.loadingSave) this.nextGoal()
 
     if (id === 'plots') {
       this.expandFieldToFenceDepth()
@@ -2115,7 +2237,7 @@ export class Game {
     if (id === 'truck') {
       this.spawnTruckBayA()
       this.stage = Math.max(this.stage, 11)
-      if (!silent) this.setHint('Load jars on truck bay A for big bonus payouts!')
+      if (!silent) this.setHint('Load jars on truck bay A — trucks pay jar value plus a delivery bonus!')
     }
 
     if (id === 'autoprocess') {
@@ -2330,13 +2452,13 @@ export class Game {
     if (id === 'raceCar') {
       this.spawnRaceCar()
       this.stage = Math.max(this.stage, 36)
-      if (!silent) this.setHint('Car ready! Walk up and press Space to drive / exit')
+      if (!silent) this.setHint('Car ready! Walk up and press Space or DRIVE')
     }
 
     if (id === 'superCar') {
       this.spawnSuperCar()
       this.stage = Math.max(this.stage, 37)
-      if (!silent) this.setHint('Hypercar unlocked — much faster! Space / E to drive')
+      if (!silent) this.setHint('Hypercar unlocked — much faster! Space / E or DRIVE')
     }
 
     this.stageEl.textContent = String(this.stage)
@@ -2861,6 +2983,7 @@ export class Game {
       leavePos: st.leavePos.clone(),
       label,
       cooldown: 0,
+      cargoValue: 0,
     }
   }
 
@@ -2887,6 +3010,7 @@ export class Game {
     if (!t || t.state !== 'wait' || t.filled >= t.need) return false
     if (!st.accepts.includes(kind)) return false
     t.filled++
+    t.cargoValue += this.itemValue(kind)
     const cargo = t.mesh.getObjectByName('cargo') as THREE.Group
     const item = makeItem(kind)
     const i = t.filled - 1
@@ -2909,22 +3033,15 @@ export class Game {
   private completeTruck(st: TruckStation) {
     const t = st.truck
     if (!t) return
-    const bonus = this.scaledIncome(
-      180 + this.stage * 15 + (st.id === 'C' ? 40 : st.id === 'B' ? 20 : 0),
-    )
-    this.dropMoney(bonus, this.moneyDropPos)
-    this.money += Math.floor(bonus * 0.25)
+    // Trucks pay the shop value of the cargo plus a delivery bonus, so loading them always beats the counter
+    const bonus = this.scaledIncome(60 + this.stage * 5 + (st.id === 'C' ? 40 : st.id === 'B' ? 20 : 0))
+    const payout = t.cargoValue + bonus
+    this.dropMoney(payout, this.moneyDropPos)
+    this.setHint(`Truck ${st.id} full! +$${payout}`)
     if (this.goal.id === 'truck') {
       this.goal.current++
-      if (this.goal.current >= this.goal.target) {
-        const reward = this.goal.reward
-        this.money += reward
-        this.goalsDone++
-        this.nextGoal()
-        this.setHint(`Truck goal done! +$${reward}`)
-      }
+      if (this.goal.current >= this.goal.target) this.completeGoal()
     }
-    this.setHint(`Truck ${st.id} full! Bonus payout`)
     t.state = 'leave'
   }
 
@@ -2974,6 +3091,7 @@ export class Game {
         this.moveToward(t.mesh, t.leavePos, 6 * dt)
         if (t.mesh.position.distanceTo(t.leavePos) < 0.4) {
           this.scene.remove(t.mesh)
+          disposeLabel(t.label)
           st.truck = null
           st.respawn = 4
         }
@@ -3844,15 +3962,26 @@ export class Game {
     }
   }
 
+  /** Money the player has earned but not picked up yet (cash piles, truck cargo in progress). */
+  private unbankedValue(): number {
+    let v = 0
+    for (const m of this.moneyStacks) v += Math.max(0, m.amount)
+    for (const st of this.truckStations) if (st.truck && st.truck.state !== 'leave') v += st.truck.cargoValue
+    return v
+  }
+
   private saveProgress() {
-    if (this.loadingSave) return
+    // Nothing to keep until a difficulty is picked (closing the tab on the picker shows it again)
+    if (this.loadingSave || this.isNewGame) return
     const padPayments: Record<string, number> = {}
     for (const pad of this.unlockPads) {
       if (!pad.done && pad.paid > 0) padPayments[pad.id] = pad.paid
     }
     const data: SaveData = {
       v: 2,
-      money: Math.floor(this.money),
+      // Cash lying on the ground and jars already loaded into trucks aren't restored as objects,
+      // so bank their value instead of losing it on reload
+      money: Math.floor(this.money + this.unbankedValue()),
       stage: this.stage,
       maxStack: this.maxStack,
       playerSpeedMul: this.playerSpeedMul,
