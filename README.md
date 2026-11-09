@@ -28,10 +28,15 @@ Open http://127.0.0.1:5173/ (or the Network URL for LAN).
 - **DEPOT** — west goods train bay (after factory line)
 - Stand on unlock pads to spend cash
 
+## Difficulty
+
+On a new game you pick **Easy / Normal / Hard** (change it any time with the button under the money counter).
+Presets live in `src/balance.ts`: unlock prices, income, crop regrow time and goal targets.
+
 ## Progression
 
 1. **Field boost** — bigger / faster purple field  
-2. **Tractor** — auto-harvest → DUMP  
+2. **Tractor** — auto-harvest → DUMP (keeps up with field upgrades; waits if DUMP is full)  
 3. **Helper** — carries to counter  
 4. **Processor** — crops → jars  
 5. **Cashier** — auto-sell shop 1  
@@ -47,11 +52,12 @@ Open http://127.0.0.1:5173/ (or the Network URL for LAN).
 
 13. **Map expand** — bigger fence / east zone  
 14. **Egg runner** — eggs → shop 1  
-15. **Jar loader** — jars → truck bays  
+15. **Jar loader** — jars → truck bays (one courier per jar bay; helps other bays when its truck is away)  
 16. **Worker speed** — couriers move faster  
 17. **Truck bay B** — second jar station  
 18. **Field grow I/II** — purple FIELD regenerates faster  
 19. **Wheat field** — second crop  
+19b. **Wheat combine** — red combine harvests WHEAT → W-DUMP (helpers / truck C pick it up)  
 20. **Wheat grow I/II** — WHEAT regenerates faster  
 21. **Shop 2** — wheat counter + queue (manual SELL-B)  
 22. **Shop 2 helper** — wheat → SELL-B  

@@ -13,11 +13,21 @@
         <div id="goal-text">Sell items: 0/15</div>
         <div id="goal-bar"><div id="goal-fill"></div></div>
       </div>
+      <button id="difficulty-btn" type="button" title="Change difficulty">Normal</button>
       <div id="money-badge">
         <span class="bill-icon"></span>
         <span id="money-num">0</span>
       </div>
       <div id="hint">Shop at ENTER — harvest FIELD, process jars, unlock late-game east expansion</div>
+    </div>
+    <div id="difficulty-modal" class="hidden">
+      <div id="difficulty-card">
+        <h2>Choose difficulty</h2>
+        <button type="button" data-difficulty="easy"></button>
+        <button type="button" data-difficulty="normal"></button>
+        <button type="button" data-difficulty="hard"></button>
+        <button type="button" data-close class="ghost">Cancel</button>
+      </div>
     </div>
     <div id="joystick">
       <div id="joystick-base">
