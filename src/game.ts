@@ -67,6 +67,12 @@ const RAIL_Z_START = 6.5
 /** Where the N–S run bends west (north of the depot / fence). */
 const TRAIN_CURVE_Z0 = 22
 const TRAIN_CURVE_R = 13
+/** Train cruise speed, minimum crawl speed near the depot and accel/brake rate (u/s, u/s²). */
+const TRAIN_MAX_SPEED = 9
+const TRAIN_MIN_SPEED = 1.2
+const TRAIN_ACCEL = 2.4
+/** Distance between loco centre and freight-car centre along the rails. */
+const TRAIN_FREIGHT_OFFSET = 2.55
 /** Local half-depth of scaled flat Norisring (hairpin to hairpin). */
 const NORISRING_HALF_Z = 48.5
 
@@ -915,7 +921,11 @@ export class Game {
     }
     pts.push(new THREE.Vector3((leave.x + (BELT_X - R)) * 0.5, 0, leave.z))
     pts.push(leave)
-    return new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.15)
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.15)
+    // Fine arc-length table: control points are dense on the arc and sparse on the straight,
+    // and the default 200 divisions made getPointAt() speed up / slow down between them
+    curve.arcLengthDivisions = 4000
+    return curve
   }
 
   private syncTrainLeavePosition() {
@@ -924,14 +934,8 @@ export class Game {
     const leave = this.trainCurve.getPoint(1)
     this.train.leavePos.copy(leave)
     this.rebuildTrainRails()
-    if (this.train.state === 'arrive') {
-      this.train.pathU = Math.max(this.train.pathU, 0.85)
-      const p = this.trainCurve.getPoint(this.train.pathU)
-      this.train.mesh.position.set(p.x, 0, p.z)
-    } else if (this.train.state === 'respawn' || this.train.state === 'leave') {
-      this.train.mesh.position.copy(this.train.leavePos)
-      this.train.pathU = 1
-    }
+    // The curve is built from constants, so the train keeps its place (it used to jump back to u=0.85)
+    this.placeTrainAt(this.train, this.train.pathU)
   }
 
   private rebuildTrainRails() {
@@ -3415,22 +3419,61 @@ export class Game {
     this.refreshTrainLabel()
   }
 
-  /** Follow depot→west curve. Nose always toward leave (u=1); arrive backs in. */
-  private moveTrainOnCurve(tr: TrainAI, targetU: number, step: number) {
+  /**
+   * Follow depot→west curve. Nose always toward leave (u=1); arrive backs in.
+   * pathU is ARC-LENGTH based (getPointAt): the old getPoint(u) was uniform per control point,
+   * so the train crawled through the dense arc and shot down the long straight.
+   * Speed eases in/out: accelerates away from the depot and brakes into it.
+   */
+  private moveTrainOnCurve(tr: TrainAI, targetU: number, vmax: number, dt: number) {
     const curve = this.trainCurve
     if (!curve) return
     const len = Math.max(curve.getLength(), 1)
-    const du = step / len
+    const fromDepot = tr.pathU * len // distance from the depot end (u = 0)
+    // Arriving: brake as the depot gets close. Leaving: build speed up after the depot.
+    const v =
+      targetU < tr.pathU
+        ? Math.min(vmax, Math.max(TRAIN_MIN_SPEED, Math.sqrt(2 * TRAIN_ACCEL * fromDepot)))
+        : Math.min(vmax, Math.max(TRAIN_MIN_SPEED, Math.sqrt(2 * TRAIN_ACCEL * fromDepot) + TRAIN_MIN_SPEED))
+    const du = (v * dt) / len
     if (tr.pathU < targetU) tr.pathU = Math.min(targetU, tr.pathU + du)
     else if (tr.pathU > targetU) tr.pathU = Math.max(targetU, tr.pathU - du)
-    const p = curve.getPoint(tr.pathU)
-    tr.mesh.position.set(p.x, 0, p.z)
-    const tang = curve.getTangent(tr.pathU)
-    if (tang.lengthSq() > 1e-8) {
-      tang.normalize()
-      // Nose is local −X; align with +tangent (toward leave / west-north)
-      tr.mesh.rotation.y = Math.atan2(tang.x, tang.z) + Math.PI / 2
+    this.placeTrainAt(tr, tr.pathU)
+  }
+
+  /** World point / tangent at a distance along the curve (extends straight past the depot end). */
+  private trainCurveSample(s: number): { p: THREE.Vector3; t: THREE.Vector3 } {
+    const curve = this.trainCurve!
+    const len = Math.max(curve.getLength(), 1)
+    if (s <= 0) {
+      const t = curve.getTangentAt(0).normalize()
+      return { p: curve.getPointAt(0).addScaledVector(t, s), t }
     }
+    const u = Math.min(1, s / len)
+    return { p: curve.getPointAt(u), t: curve.getTangentAt(u).normalize() }
+  }
+
+  /** Put the loco at pathU and let the freight car sit on the rails behind it (not rigidly attached). */
+  private placeTrainAt(tr: TrainAI, u: number) {
+    const curve = this.trainCurve
+    if (!curve) return
+    const len = Math.max(curve.getLength(), 1)
+    const s = u * len
+    const loco = this.trainCurveSample(s)
+    tr.mesh.position.set(loco.p.x, 0, loco.p.z)
+    // Nose is local −X; align with +tangent (toward leave / west-north)
+    const yaw = Math.atan2(loco.t.x, loco.t.z) + Math.PI / 2
+    tr.mesh.rotation.y = yaw
+    const freight = tr.mesh.getObjectByName('freight')
+    if (!freight) return
+    // Freight centre is 2.55 behind the loco centre (local +X = toward the depot)
+    const car = this.trainCurveSample(s - TRAIN_FREIGHT_OFFSET)
+    const dx = car.p.x - loco.p.x
+    const dz = car.p.z - loco.p.z
+    const c = Math.cos(-yaw)
+    const sn = Math.sin(-yaw)
+    freight.position.set(dx * c + dz * sn, 0, -dx * sn + dz * c)
+    freight.rotation.y = Math.atan2(car.t.x, car.t.z) + Math.PI / 2 - yaw
   }
 
   private refreshTrainLabel() {
@@ -3527,7 +3570,7 @@ export class Game {
       t.respawn -= dt
       if (t.respawn <= 0) {
         t.pathU = 1
-        t.mesh.position.copy(t.leavePos)
+        this.placeTrainAt(t, 1)
         t.cargoValue = 0
         t.cargoCount = 0
         const cargo = t.mesh.getObjectByName('cargo') as THREE.Group | undefined
@@ -3541,10 +3584,10 @@ export class Game {
 
     if (t.state === 'arrive') {
       // Back in along the curve (nose toward leave / west-north)
-      this.moveTrainOnCurve(t, 0, 5.5 * dt)
-      if (t.pathU <= 0.02 || t.mesh.position.distanceTo(t.waitPos) < 0.35) {
+      this.moveTrainOnCurve(t, 0, TRAIN_MAX_SPEED, dt)
+      if (t.pathU <= 0.002) {
         t.pathU = 0
-        t.mesh.position.copy(t.waitPos)
+        this.placeTrainAt(t, 0)
         t.state = 'wait'
       }
       return
@@ -3595,8 +3638,8 @@ export class Game {
     }
 
     if (t.state === 'leave') {
-      this.moveTrainOnCurve(t, 1, 6.5 * dt)
-      if (t.pathU >= 0.98 || t.mesh.position.distanceTo(t.leavePos) < 0.5) {
+      this.moveTrainOnCurve(t, 1, TRAIN_MAX_SPEED, dt)
+      if (t.pathU >= 0.999) {
         t.pathU = 1
         this.scene.remove(t.mesh)
         t.state = 'respawn'

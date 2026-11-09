@@ -180,58 +180,68 @@ function addPaintedKerbs(
 }
 
 /**
- * Norisring (Nürnberg): flat walkable street circuit.
- * Layout: SF → Grundigkehre → Schöller-S → Dutzendteichkehre → SF.
+ * NoRiseRing — original flat street circuit (local coords; the game rotates it 180° so +z faces the farm).
+ * Lap (clockwise from above): main straight (x -24, start/finish + tribune) → NW sweeper → top straight
+ * with the farm entrance → long 135° right → flowing S through the infield → 90° left → signature
+ * hairpin (R≈10.4) around the lake → long south straight → last corner.
+ * Every corner has radius ≥ 10.4, so the barriers (offset 3.75) never fold over themselves —
+ * the old layout had an S-bend with radius ≈ 1 whose kerbs/barriers looped.
+ * Points are dense (≈4 u apart) on purpose: sparser points pinch the hairpin.
  */
+const TRACK_POINTS: [number, number][] = [
+  [-23.90, -31.94], [-24.00, -27.97], [-24.00, -24.00], [-24.00, -20.03],
+  [-24.00, -16.05], [-24.00, -12.08], [-24.00, -8.10], [-24.00, -4.13],
+  [-24.00, -0.16], [-24.00, 3.82], [-24.00, 7.79], [-24.00, 11.76],
+  [-24.00, 15.74], [-24.00, 19.71], [-24.00, 23.68], [-23.99, 27.66],
+  [-23.79, 31.62], [-22.87, 35.48], [-20.93, 38.93], [-18.10, 41.70],
+  [-14.59, 43.54], [-10.72, 44.37], [-6.75, 44.54], [-2.77, 44.54],
+  [1.20, 44.48], [5.13, 43.93], [8.77, 42.37], [11.76, 39.78],
+  [13.81, 36.39], [14.73, 32.54], [14.42, 28.60], [12.93, 24.93],
+  [10.54, 21.76], [7.97, 18.74], [5.90, 15.35], [4.29, 11.72],
+  [2.42, 8.22], [-0.05, 5.11], [-2.62, 2.08], [-4.59, -1.36],
+  [-5.61, -5.18], [-5.68, -9.15], [-4.76, -13.00], [-2.80, -16.45],
+  [0.05, -19.20], [3.56, -21.02], [7.44, -21.84], [11.41, -22.03],
+  [15.35, -22.46], [19.05, -23.88], [22.07, -26.43], [24.07, -29.84],
+  [24.83, -33.72], [24.26, -37.63], [22.42, -41.13], [19.53, -43.83],
+  [15.90, -45.42], [11.97, -45.95], [8.00, -46.00], [4.03, -46.00],
+  [0.05, -46.00], [-3.92, -46.00], [-7.89, -45.98], [-11.85, -45.68],
+  [-15.65, -44.57], [-18.99, -42.44], [-21.59, -39.46], [-23.24, -35.85],
+]
+const TRACK_START_FINISH = { x: -24, z: 0 }
+const TRACK_TRIBUNE = { x: -33.3, z: -1 }
+const TRACK_LAKE = { x: 22, z: 2 }
+
 export function makeNorisring(): THREE.Group {
   const g = new THREE.Group()
   g.name = 'norisring'
 
-  const S = 3.35
-  const layout = [
-    new THREE.Vector3(-7 * S, 0, -11 * S),
-    new THREE.Vector3(-7 * S, 0, -4 * S),
-    new THREE.Vector3(-7 * S, 0, 3 * S),
-    new THREE.Vector3(-6 * S, 0, 9 * S),
-    new THREE.Vector3(-3 * S, 0, 13 * S),
-    new THREE.Vector3(1 * S, 0, 14.5 * S),
-    new THREE.Vector3(5 * S, 0, 13 * S),
-    new THREE.Vector3(7 * S, 0, 9 * S),
-    new THREE.Vector3(7.5 * S, 0, 4 * S),
-    new THREE.Vector3(8.8 * S, 0, 1.5 * S),
-    new THREE.Vector3(5.8 * S, 0, -0.4 * S),
-    new THREE.Vector3(8.2 * S, 0, -2.8 * S),
-    new THREE.Vector3(7.5 * S, 0, -7 * S),
-    new THREE.Vector3(6 * S, 0, -11 * S),
-    new THREE.Vector3(3 * S, 0, -14 * S),
-    new THREE.Vector3(-1 * S, 0, -14.5 * S),
-    new THREE.Vector3(-5 * S, 0, -13 * S),
-    new THREE.Vector3(-7 * S, 0, -11 * S),
-  ]
-  const curve = new THREE.CatmullRomCurve3(layout, true, 'catmullrom', 0.4)
+  const layout = TRACK_POINTS.map(([x, z]) => new THREE.Vector3(x, 0, z))
+  // Centripetal Catmull-Rom: no cusps / overshoot between control points
+  const curve = new THREE.CatmullRomCurve3(layout, true, 'centripetal')
+  curve.arcLengthDivisions = 2000
   const trackWidth = 5.2
   const halfW = trackWidth * 0.5
 
   // Asphalt = same hex as train rail ballast (0x57534e)
   const ASPHALT = 0x57534e
-  const shoulder = makeFlatRoadRibbon(curve, trackWidth + 2.2, 200, 0.03, ASPHALT)
+  const shoulder = makeFlatRoadRibbon(curve, trackWidth + 2.2, 320, 0.03, ASPHALT)
   shoulder.name = 'asphalt-shoulder'
   g.add(shoulder)
-  const road = makeFlatRoadRibbon(curve, trackWidth, 240, 0.06, ASPHALT)
+  const road = makeFlatRoadRibbon(curve, trackWidth, 360, 0.06, ASPHALT)
   road.name = 'asphalt'
   road.receiveShadow = true
   g.add(road)
 
-  addPaintedKerbs(g, curve, halfW - 0.12, 128)
-  addPaintedKerbs(g, curve, -(halfW - 0.12), 128)
+  addPaintedKerbs(g, curve, halfW - 0.12, 180)
+  addPaintedKerbs(g, curve, -(halfW - 0.12), 180)
 
   // Outer barrier opens at the northern tip (toward the farm) for pit entry
-  const outerPts = offsetTrackPoints(curve, halfW + 1.15, 110)
+  const outerPts = offsetTrackPoints(curve, halfW + 1.15, 160)
   let northI = 0
   for (let i = 1; i < outerPts.length; i++) {
     if (outerPts[i]!.z > outerPts[northI]!.z) northI = i
   }
-  const gapHalf = 4 // ~8 segments ≈ 4–5 u wide entrance
+  const gapHalf = 3 // ~6 segments ≈ 5 u wide entrance
   const inEntranceGap = (i: number, n: number) => {
     const d = Math.min(Math.abs(i - northI), n - Math.abs(i - northI))
     return d <= gapHalf
@@ -239,7 +249,7 @@ export function makeNorisring(): THREE.Group {
   const outerWalls = addBarrierChain(g, outerPts, 0.85, 0.22, 0xd4d4d8, inEntranceGap)
   const innerWalls = addBarrierChain(
     g,
-    offsetTrackPoints(curve, -(halfW + 1.15), 110),
+    offsetTrackPoints(curve, -(halfW + 1.15), 160),
     0.85,
     0.22,
     0xd4d4d8,
@@ -269,7 +279,7 @@ export function makeNorisring(): THREE.Group {
   g.userData.entrance = { x: gateMid.x, z: gateMid.z + 1.4 }
 
   const dashMat = new THREE.MeshLambertMaterial({ color: 0xf8fafc })
-  const spaced = curve.getSpacedPoints(100)
+  const spaced = curve.getSpacedPoints(130)
   for (let i = 0; i < spaced.length; i += 2) {
     const p = spaced[i]!
     const q = spaced[(i + 1) % spaced.length]!
@@ -283,35 +293,51 @@ export function makeNorisring(): THREE.Group {
     g.add(dash)
   }
 
-  const sfX = -7 * S
-  const sfZ = -2 * S
-  for (let i = 0; i < 8; i++) {
-    const block = new THREE.Mesh(
-      new THREE.BoxGeometry(trackWidth / 8, 0.05, 0.65),
-      new THREE.MeshLambertMaterial({ color: i % 2 === 0 ? 0xffffff : 0x111827 }),
-    )
-    block.position.set(sfX - halfW + trackWidth / 16 + i * (trackWidth / 8), 0.085, sfZ)
-    g.add(block)
+  {
+    // Start/finish checker line across the road, perpendicular to the track direction
+    let bestU = 0
+    let bestD = Infinity
+    for (let i = 0; i <= 400; i++) {
+      const p = curve.getPointAt(i / 400)
+      const d = Math.hypot(p.x - TRACK_START_FINISH.x, p.z - TRACK_START_FINISH.z)
+      if (d < bestD) {
+        bestD = d
+        bestU = i / 400
+      }
+    }
+    const c = curve.getPointAt(bestU)
+    const t = curve.getTangentAt(bestU).setY(0).normalize()
+    const side = new THREE.Vector3(-t.z, 0, t.x)
+    const yaw = Math.atan2(t.x, t.z)
+    const white = new THREE.MeshLambertMaterial({ color: 0xffffff })
+    const black = new THREE.MeshLambertMaterial({ color: 0x111827 })
+    for (let i = 0; i < 8; i++) {
+      const block = new THREE.Mesh(new THREE.BoxGeometry(trackWidth / 8, 0.05, 0.65), i % 2 === 0 ? white : black)
+      const o = -halfW + trackWidth / 16 + i * (trackWidth / 8)
+      block.position.set(c.x + side.x * o, 0.085, c.z + side.z * o)
+      block.rotation.y = yaw
+      g.add(block)
+    }
   }
 
   const tribune = new THREE.Group()
-  tribune.position.set(-12.8 * S, 0, 0)
+  tribune.position.set(TRACK_TRIBUNE.x, 0, TRACK_TRIBUNE.z)
   const base = new THREE.Mesh(
-    new THREE.BoxGeometry(7, 1.4, 22 * S * 0.55),
+    new THREE.BoxGeometry(7, 1.4, 40.5),
     new THREE.MeshLambertMaterial({ color: 0xa8a29e }),
   )
   base.position.y = 0.7
   tribune.add(base)
   for (let i = 0; i < 7; i++) {
     const step = new THREE.Mesh(
-      new THREE.BoxGeometry(6.2 - i * 0.4, 0.4, 21 * S * 0.55),
+      new THREE.BoxGeometry(6.2 - i * 0.4, 0.4, 38.7),
       new THREE.MeshLambertMaterial({ color: 0xd6d3d1 }),
     )
     step.position.set(-0.3 - i * 0.18, 1.25 + i * 0.38, 0)
     tribune.add(step)
   }
   const wall = new THREE.Mesh(
-    new THREE.BoxGeometry(0.45, 4.2, 22 * S * 0.55),
+    new THREE.BoxGeometry(0.45, 4.2, 40.5),
     new THREE.MeshLambertMaterial({ color: 0x78716c }),
   )
   wall.position.set(-3.4, 2.1, 0)
@@ -319,11 +345,11 @@ export function makeNorisring(): THREE.Group {
   g.add(tribune)
 
   const lake = new THREE.Mesh(
-    new THREE.CircleGeometry(4.5 * S * 0.55, 24),
+    new THREE.CircleGeometry(8.3, 24),
     new THREE.MeshLambertMaterial({ color: 0x38bdf8 }),
   )
   lake.rotation.x = -Math.PI / 2
-  lake.position.set(10 * S * 0.7, 0.02, -14 * S)
+  lake.position.set(TRACK_LAKE.x, 0.02, TRACK_LAKE.z)
   g.add(lake)
 
   return g
