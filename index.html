@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Farm Idle — Township Ad Style</title>
+    <script type="module" crossorigin src="/TownshipAdvertisementGame/assets/index-DR5npQHH.js"></script>
+    <link rel="stylesheet" crossorigin href="/TownshipAdvertisementGame/assets/index-DdoSeaDE.css">
+  </head>
+  <body>
+    <div id="ui">
+      <div id="stage-badge">UNLOCKS <span id="stage-num">0</span></div>
+      <div id="goal-badge">
+        <div id="goal-text">Sell items: 0/15</div>
+        <div id="goal-bar"><div id="goal-fill"></div></div>
+        <div id="next-pad" hidden></div>
+      </div>
+      <button id="difficulty-btn" type="button" title="Change difficulty">Normal</button>
+      <button id="mute-btn" type="button" title="Sound on / off">🔊</button>
+      <div id="money-badge">
+        <span class="bill-icon"></span>
+        <span id="money-num">0</span>
+      </div>
+      <div id="hint">Shop at ENTER — harvest FIELD, process jars, unlock late-game east expansion</div>
+    </div>
+    <div id="difficulty-modal" class="hidden">
+      <div id="difficulty-card">
+        <h2>Choose difficulty</h2>
+        <button type="button" data-difficulty="easy"></button>
+        <button type="button" data-difficulty="normal"></button>
+        <button type="button" data-difficulty="hard"></button>
+        <button type="button" data-close class="ghost">Cancel</button>
+      </div>
+    </div>
+    <div id="offline-modal" class="hidden">
+      <div id="offline-card">
+        <h2>Welcome back!</h2>
+        <p id="offline-text">While you were away your farm earned</p>
+        <div id="offline-amount">$0</div>
+        <button type="button" id="offline-collect">Collect</button>
+      </div>
+    </div>
+    <button id="drive-btn" type="button" hidden>DRIVE</button>
+    <div id="joystick">
+      <div id="joystick-base">
+        <div id="joystick-knob"></div>
+      </div>
+    </div>
+    <canvas id="game"></canvas>
+  </body>
+</html>
