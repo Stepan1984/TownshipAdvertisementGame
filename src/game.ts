@@ -5,6 +5,8 @@ import {
   DEFAULT_DIFFICULTY,
   DIFFICULTIES,
   JAR_LOADER_CAPACITY,
+  TRUCK_LOAD_INTERVAL,
+  TRUCK_PREMIUM,
   isDifficulty,
   type Difficulty,
 } from './balance'
@@ -356,8 +358,10 @@ type TruckOrder = {
   leavePos: THREE.Vector3
   label: THREE.Sprite
   cooldown: number
-  /** Shop value of everything loaded — paid back on completion plus a bonus. */
+  /** Shop value of everything loaded — paid x TRUCK_PREMIUM on completion plus a bonus. */
   cargoValue: number
+  /** Bay id (A/B/C) — the delivery bonus depends on it. */
+  bay: string
 }
 
 type TruckStation = {
@@ -2479,7 +2483,7 @@ export class Game {
     if (id === 'truck') {
       this.spawnTruckBayA()
       this.stage = Math.max(this.stage, 11)
-      if (!silent) this.setHint('Load jars on truck bay A — trucks pay jar value plus a delivery bonus!')
+      if (!silent) this.setHint('Load jars on truck bay A — trucks pay 1.5x the shop price plus a bonus!')
     }
 
     if (id === 'autoprocess') {
@@ -3236,7 +3240,9 @@ export class Game {
       label,
       cooldown: 0,
       cargoValue: 0,
+      bay: st.id,
     }
+    this.refreshTruckLabel(st.truck) // show the projected payout from the start
   }
 
   private refreshTruckLabel(t: TruckOrder) {
@@ -3245,12 +3251,16 @@ export class Game {
     canvas.height = 96
     const ctx = canvas.getContext('2d')!
     ctx.fillStyle = 'rgba(0,0,0,0.35)'
-    ctx.fillRect(16, 16, 224, 64)
-    ctx.fillStyle = '#ffffff'
-    ctx.font = 'bold 42px Segoe UI, sans-serif'
+    ctx.fillRect(16, 6, 224, 84)
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(`${t.filled}/${t.need}`, 128, 48)
+    ctx.fillStyle = '#ffffff'
+    ctx.font = 'bold 36px Segoe UI, sans-serif'
+    ctx.fillText(`${t.filled}/${t.need}`, 128, 30)
+    // What the full truck will pay — shows why loading it beats the counter
+    ctx.fillStyle = '#86efac'
+    ctx.font = 'bold 30px Segoe UI, sans-serif'
+    ctx.fillText(`$${this.truckPayout(t, true)}`, 128, 68)
     const mat = t.label.material
     mat.map?.dispose()
     mat.map = new THREE.CanvasTexture(canvas)
@@ -3282,13 +3292,26 @@ export class Game {
     return true
   }
 
+  /**
+   * What a truck pays: its cargo at TRUCK_PREMIUM x shop value plus a delivery bonus.
+   * `projected` = assume the rest of the order is filled with jars (for the label).
+   */
+  private truckPayout(t: TruckOrder, projected = false): number {
+    const missing = projected ? Math.max(0, t.need - t.filled) * this.itemValue('jar') : 0
+    const bonus = this.scaledIncome(40 + this.stage * 4 + (t.bay === 'C' ? 40 : t.bay === 'B' ? 20 : 0))
+    return Math.round((t.cargoValue + missing) * TRUCK_PREMIUM) + bonus
+  }
+
   private completeTruck(st: TruckStation) {
     const t = st.truck
     if (!t) return
-    // Trucks pay the shop value of the cargo plus a delivery bonus, so loading them always beats the counter
-    const bonus = this.scaledIncome(60 + this.stage * 5 + (st.id === 'C' ? 40 : st.id === 'B' ? 20 : 0))
-    const payout = t.cargoValue + bonus
-    this.dropMoney(payout, this.moneyDropPos)
+    // Paid straight into the wallet with a big popup at the truck (cash used to drop far away at shop 1)
+    const payout = this.truckPayout(t)
+    this.money += payout
+    this.earnWindow += payout
+    this.pulseMoney()
+    this.sfx.goal()
+    this.spawnFloat(`+$${payout}`, t.mesh.position, '#fde047')
     this.setHint(`Truck ${st.id} full! +$${payout}`)
     if (this.goal.id === 'truck') {
       this.goal.current++
@@ -3320,7 +3343,7 @@ export class Game {
           if (t.cooldown <= 0) {
             const kind = [...this.stack].reverse().find((k) => st.accepts.includes(k))
             if (kind) {
-              t.cooldown = 0.22
+              t.cooldown = TRUCK_LOAD_INTERVAL
               const idx = this.stack.lastIndexOf(kind)
               if (idx >= 0) {
                 this.stack.splice(idx, 1)

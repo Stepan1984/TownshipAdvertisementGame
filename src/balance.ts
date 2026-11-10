@@ -50,5 +50,14 @@ export function isDifficulty(v: unknown): v is Difficulty {
   return v === 'easy' || v === 'normal' || v === 'hard'
 }
 
+/**
+ * Truck orders: cargo is paid at TRUCK_PREMIUM x its shop value, plus a delivery bonus,
+ * straight into the wallet. At 1.0 trucks felt worse than the counter (payout only after
+ * 40 jars, slow loading, cash dropped far away at shop 1).
+ */
+export const TRUCK_PREMIUM = 1.5
+/** Seconds per item when the player loads a truck by hand. */
+export const TRUCK_LOAD_INTERVAL = 0.06
+
 /** Max jars one jar loader carries per trip. */
 export const JAR_LOADER_CAPACITY = 16
